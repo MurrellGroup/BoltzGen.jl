@@ -116,7 +116,9 @@ function main()
     isempty(target_path) && error("Missing --target <path-to-pdb-or-cif>")
 
     include_chains = parse_chain_list(get(args, "target-chains", ""))
-    parsed = BoltzGen.load_structure_tokens(target_path; include_chains=include_chains, include_nonpolymer=false)
+    include_nonpolymer_default = with_affinity ? "true" : "false"
+    include_nonpolymer = get(args, "include-nonpolymer", include_nonpolymer_default) == "true"
+    parsed = BoltzGen.load_structure_tokens(target_path; include_chains=include_chains, include_nonpolymer=include_nonpolymer)
 
     d_tokens, d_chain_type = design_tokens(args)
     d_mol_type = BoltzGen.chain_type_ids[d_chain_type]
@@ -158,6 +160,19 @@ function main()
     end
 
     structure_group = vcat(fill(1, T_target), fill(0, T_total - T_target))
+    affinity_token_mask = if haskey(args, "affinity-mask")
+        parse_index_set(args["affinity-mask"], T_total)
+    elseif with_affinity
+        [mol_types[i] == BoltzGen.chain_type_ids["NONPOLYMER"] for i in 1:T_total]
+    else
+        falses(T_total)
+    end
+    affinity_mw = haskey(args, "affinity-mw") ? Float32(parse(Float64, args["affinity-mw"])) : 0f0
+
+    if with_affinity && !any(affinity_token_mask)
+        println("Warning: affinity enabled but affinity_token_mask is empty.")
+    end
+
     weights_path = get(args, "weights", joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"))
     require_sampling_checkpoint!(weights_path; requires_design_conditioning=any(design_mask))
     steps = parse(Int, get(args, "steps", "100"))
@@ -197,6 +212,8 @@ function main()
         structure_group=structure_group,
         msa_sequences=msa_sequences,
         max_msa_rows=msa_max_rows,
+        affinity_token_mask=affinity_token_mask,
+        affinity_mw=affinity_mw,
         template_paths=template_paths,
         max_templates=template_max_count,
         template_include_chains=template_chains,
