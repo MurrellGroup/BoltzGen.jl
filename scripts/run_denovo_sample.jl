@@ -38,6 +38,8 @@ function main()
     num_sampling_steps = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 100
     recycling_steps = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 3
     out_pdb = length(ARGS) >= 4 ? ARGS[4] : joinpath(WORKSPACE_ROOT, "boltzgen_cache", "generated_denovo_len$(token_len)_julia.pdb")
+    out_pdb37 = replace(out_pdb, ".pdb" => "_atom37.pdb")
+    out_pdb37 == out_pdb && (out_pdb37 = out_pdb * "_atom37.pdb")
     weights_path = length(ARGS) >= 5 ? ARGS[5] : joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors")
     require_sampling_checkpoint!(weights_path; requires_design_conditioning=true)
     with_confidence = length(ARGS) >= 6 ? (ARGS[6] == "1") : false
@@ -70,8 +72,22 @@ function main()
 
     coords = out["sample_atom_coords"]
     feats_out = BoltzGen.postprocess_atom14(feats_masked, coords)
+    geom = BoltzGen.assert_geometry_sane_atom37!(feats_out, coords; batch=1)
+    println(
+        "Geometry(atom37): atoms=",
+        geom.n_atoms,
+        " maxabs=",
+        geom.max_abs,
+        " minnn=",
+        geom.min_nearest_neighbor,
+        " frac_abs_ge900=",
+        geom.frac_abs_ge900,
+    )
+
     mkpath(dirname(out_pdb))
+    mkpath(dirname(out_pdb37))
     BoltzGen.write_pdb(out_pdb, feats_out, coords; batch=1)
+    BoltzGen.write_pdb_atom37(out_pdb37, feats_out, coords; batch=1)
     if !isempty(out_heads)
         mkpath(dirname(out_heads))
         open(out_heads, "w") do io
@@ -90,6 +106,7 @@ function main()
         println("Wrote head summary: ", out_heads)
     end
     println("Wrote PDB: ", out_pdb)
+    println("Wrote PDB (atom37 mapped): ", out_pdb37)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

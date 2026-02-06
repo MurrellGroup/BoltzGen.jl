@@ -31,6 +31,8 @@ export write_pdb
 export write_pdb_atom37
 export write_mmcif
 export collect_atom37_entries
+export geometry_stats_atom37
+export assert_geometry_sane_atom37!
 export postprocess_atom14
 export boltz_masker
 export build_denovo_atom14_features
