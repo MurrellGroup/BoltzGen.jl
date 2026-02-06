@@ -64,6 +64,11 @@ function parse_chain_list(spec::AbstractString)
     return [String(strip(s)) for s in split(spec, ',') if !isempty(strip(s))]
 end
 
+function parse_chain_set(spec::AbstractString)
+    isempty(strip(spec)) && return nothing
+    return Set(String(strip(s)) for s in split(spec, ',') if !isempty(strip(s)))
+end
+
 function parse_string_list(spec::AbstractString)
     isempty(strip(spec)) && return String[]
     return [String(strip(s)) for s in split(spec, ',') if !isempty(strip(s))]
@@ -134,6 +139,7 @@ function main()
     asym_ids = copy(parsed.asym_ids)
     entity_ids = copy(parsed.entity_ids)
     sym_ids = copy(parsed.sym_ids)
+    chain_labels = copy(parsed.chain_labels)
     residue_indices = copy(parsed.residue_indices)
     token_atom_names_override = copy(parsed.token_atom_names)
     token_atom_coords_override = copy(parsed.token_atom_coords)
@@ -150,6 +156,7 @@ function main()
             push!(asym_ids, new_asym)
             push!(entity_ids, new_asym)
             push!(sym_ids, 0)
+            push!(chain_labels, "DESIGN")
             push!(residue_indices, next_res + k - 1)
             push!(token_atom_names_override, String[])
             push!(token_atom_coords_override, Dict{String,NTuple{3,Float32}}())
@@ -166,8 +173,11 @@ function main()
     end
 
     structure_group = vcat(fill(1, T_target), fill(0, T_total - T_target))
+    affinity_chain_set = haskey(args, "affinity-chains") ? parse_chain_set(args["affinity-chains"]) : nothing
     affinity_token_mask = if haskey(args, "affinity-mask")
         parse_index_set(args["affinity-mask"], T_total)
+    elseif affinity_chain_set !== nothing
+        [chain_labels[i] in affinity_chain_set for i in 1:T_total]
     elseif with_affinity
         [mol_types[i] == BoltzGen.chain_type_ids["NONPOLYMER"] for i in 1:T_total]
     else
