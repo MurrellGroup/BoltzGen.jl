@@ -1105,15 +1105,74 @@ end
 function _parse_structure_records(path::AbstractString; use_assembly::Bool=false)
     p = lowercase(path)
     if endswith(p, ".pdb")
-        if use_assembly
-            @warn "use_assembly=true requested for PDB path $(path), but PDB assembly reconstruction is not implemented yet; using asymmetric unit records."
-        end
         keys = Tuple{String, Int, String, String}[]
         rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
         rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
         rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+        lines = readlines(path)
 
-        for line in eachline(path)
+        pdb_op_rows = Dict{Int, Dict{Int, NTuple{4, Float32}}}()
+        pdb_op_chains = Dict{Int, Set{String}}()
+        active_remarks = false
+        first_biomolecule = nothing
+        active_chains = Set{String}()
+        if use_assembly
+            for line in lines
+                startswith(line, "REMARK 350") || continue
+                if occursin("BIOMOLECULE:", line)
+                    bits = split(line, ':'; limit=2)
+                    if length(bits) == 2
+                        bid = _safeparse_int(strip(bits[2]), 0)
+                        if first_biomolecule === nothing
+                            first_biomolecule = bid
+                        end
+                        active_remarks = bid == first_biomolecule
+                    else
+                        active_remarks = false
+                    end
+                    empty!(active_chains)
+                    continue
+                end
+                active_remarks || continue
+                if occursin("APPLY THE FOLLOWING TO CHAINS:", line) || occursin("AND CHAINS:", line)
+                    bits = split(line, ':', limit=2)
+                    if length(bits) == 2
+                        for item in split(bits[2], ',')
+                            c = _normalize_chain_id(strip(item))
+                            c == "_" && continue
+                            push!(active_chains, c)
+                        end
+                    end
+                    continue
+                end
+                occursin("BIOMT", line) || continue
+                toks = split(strip(line))
+                biomt_idx = findfirst(t -> startswith(t, "BIOMT"), toks)
+                biomt_idx === nothing && continue
+                (biomt_idx + 5 <= length(toks)) || continue
+                biomt_tok = toks[biomt_idx]
+                row_id = _safeparse_int(replace(biomt_tok, "BIOMT" => ""), 0)
+                row_id in (1, 2, 3) || continue
+                op_id = _safeparse_int(toks[biomt_idx + 1], 0)
+                op_id > 0 || continue
+                r1 = _safeparse_f32(toks[biomt_idx + 2], 0f0)
+                r2 = _safeparse_f32(toks[biomt_idx + 3], 0f0)
+                r3 = _safeparse_f32(toks[biomt_idx + 4], 0f0)
+                rv = _safeparse_f32(toks[biomt_idx + 5], 0f0)
+                if !haskey(pdb_op_rows, op_id)
+                    pdb_op_rows[op_id] = Dict{Int, NTuple{4, Float32}}()
+                end
+                pdb_op_rows[op_id][row_id] = (r1, r2, r3, rv)
+                if !haskey(pdb_op_chains, op_id)
+                    pdb_op_chains[op_id] = Set{String}()
+                end
+                for c in active_chains
+                    push!(pdb_op_chains[op_id], c)
+                end
+            end
+        end
+
+        for line in lines
             length(line) < 54 && continue
             rec = line[1:6]
             if !(rec == "ATOM  " || rec == "HETATM")
@@ -1144,6 +1203,57 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
             if !haskey(rec_coords[key], atom_name)
                 push!(rec_atoms[key], atom_name)
                 rec_coords[key][atom_name] = (x, y, z)
+            end
+        end
+
+        if use_assembly
+            pdb_ops = Dict{Int, NamedTuple{(:m, :v), Tuple{NTuple{9, Float32}, NTuple{3, Float32}}}}()
+            for (op_id, rows) in pdb_op_rows
+                if haskey(rows, 1) && haskey(rows, 2) && haskey(rows, 3)
+                    r1 = rows[1]
+                    r2 = rows[2]
+                    r3 = rows[3]
+                    pdb_ops[op_id] = (
+                        m=(r1[1], r1[2], r1[3], r2[1], r2[2], r2[3], r3[1], r3[2], r3[3]),
+                        v=(r1[4], r2[4], r3[4]),
+                    )
+                end
+            end
+
+            if !isempty(pdb_ops)
+                old_keys = copy(keys)
+                old_atoms = rec_atoms
+                old_coords = rec_coords
+                old_het = rec_het
+                all_chains = Set(k[1] for k in old_keys)
+                keys = Tuple{String, Int, String, String}[]
+                rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
+                rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
+                rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+
+                op_ids = sort!(collect(Base.keys(pdb_ops)))
+                for (copy_idx, op_id) in enumerate(op_ids)
+                    op = pdb_ops[op_id]
+                    chains_to_apply = get(pdb_op_chains, op_id, all_chains)
+                    isempty(chains_to_apply) && (chains_to_apply = all_chains)
+                    for key in old_keys
+                        chain, res_seq, ins, comp_id = key
+                        chain in chains_to_apply || continue
+                        new_chain = string(chain, copy_idx)
+                        new_key = (new_chain, res_seq, ins, comp_id)
+                        atoms = old_atoms[key]
+                        coords_new = Dict{String, NTuple{3, Float32}}()
+                        for atom_name in atoms
+                            coords_new[atom_name] = _apply_oper(op, old_coords[key][atom_name])
+                        end
+                        push!(keys, new_key)
+                        rec_atoms[new_key] = copy(atoms)
+                        rec_coords[new_key] = coords_new
+                        rec_het[new_key] = old_het[key]
+                    end
+                end
+            else
+                @warn "use_assembly=true requested for PDB path $(path), but no valid REMARK 350 BIOMT transforms were found; using asymmetric unit records."
             end
         end
         return keys, rec_atoms, rec_coords, rec_het
