@@ -831,11 +831,26 @@ function parse_design_yaml(
                     ids = _as_list(_ydict_get(spec, "id", nothing))
                     isempty(ids) && error("Missing id for ligand entity")
                     smiles = _ydict_get(spec, "smiles", nothing)
-                    smiles === nothing || error("Ligand SMILES in YAML is not supported in pure-Julia mode yet (CCD/file ligands are supported)")
                     ccd = _ydict_get(spec, "ccd", nothing)
-                    ccd === nothing && error("Ligand entity requires 'ccd' in pure-Julia mode")
-                    ccds = _as_list(ccd)
-                    toks = [haskey(token_ids, _upper(x)) ? _upper(x) : "UNK" for x in ccds]
+
+                    toks = String[]
+                    atom_names_src = Vector{Vector{String}}()
+                    atom_coords_src = Vector{Dict{String,NTuple{3,Float32}}}()
+                    if smiles !== nothing
+                        smiles_list = [strip(string(x)) for x in _as_list(smiles)]
+                        lig = smiles_to_ligand_tokens(smiles_list)
+                        toks = lig.tokens
+                        atom_names_src = lig.token_atom_names
+                        atom_coords_src = lig.token_atom_coords
+                    elseif ccd !== nothing
+                        ccds = _as_list(ccd)
+                        toks = [haskey(token_ids, _upper(x)) ? _upper(x) : "UNK" for x in ccds]
+                        atom_names_src = [String[] for _ in 1:length(toks)]
+                        atom_coords_src = [Dict{String,NTuple{3,Float32}}() for _ in 1:length(toks)]
+                    else
+                        error("Ligand entity requires either 'smiles' or 'ccd'")
+                    end
+
                     n = length(toks)
                     btype = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), n)
                     sstype = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), n)
@@ -858,8 +873,8 @@ function parse_design_yaml(
                         append!(ent_mol_types, fill(mt, n))
                         append!(ent_residue_indices, collect(1:n))
                         append!(ent_chain_labels, fill(cid, n))
-                        append!(ent_token_atom_names, [String[] for _ in 1:n])
-                        append!(ent_token_atom_coords, [Dict{String,NTuple{3,Float32}}() for _ in 1:n])
+                        append!(ent_token_atom_names, [copy(atom_names_src[i]) for i in 1:n])
+                        append!(ent_token_atom_coords, [copy(atom_coords_src[i]) for i in 1:n])
                         append!(ent_design_mask, fill(false, n))
                         append!(ent_binding_type, btype)
                         append!(ent_ss_type, sstype)

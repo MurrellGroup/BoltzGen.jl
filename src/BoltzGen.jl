@@ -11,6 +11,7 @@ using YAML
 include("const.jl")
 include("utils.jl")
 include("features.jl")
+include("smiles.jl")
 include("yaml_parser.jl")
 include("checkpoint.jl")
 include("transformers.jl")

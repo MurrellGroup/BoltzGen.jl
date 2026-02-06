@@ -11,6 +11,12 @@ Random = "9a3f8284-686f-5f34-9a43-1f3a9d6f9a6c"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 SafeTensors = "eeda0dda-7046-4914-a807-2495fc7abb89"
 
+[weakdeps]
+MoleculeFlow = "0907176b-47b3-4e96-be91-0e9bb91fb14f"
+
+[extensions]
+BoltzGenMoleculeFlowExt = "MoleculeFlow"
+
 [compat]
 NNlib = "0.9"
 Zygote = "0.6"
