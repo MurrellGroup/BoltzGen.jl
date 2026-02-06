@@ -137,6 +137,7 @@ function main()
     asym_ids = copy(parsed.asym_ids)
     entity_ids = copy(parsed.entity_ids)
     sym_ids = copy(parsed.sym_ids)
+    cyclic_period = zeros(Int, length(residues))
     chain_labels = copy(parsed.chain_labels)
     residue_indices = copy(parsed.residue_indices)
     token_atom_names_override = copy(parsed.token_atom_names)
@@ -148,12 +149,15 @@ function main()
     if !isempty(d_tokens)
         new_asym = isempty(asym_ids) ? 0 : (maximum(asym_ids) + 1)
         next_res = isempty(residue_indices) ? 1 : (maximum(residue_indices) + 1)
+        design_cyclic = lowercase(strip(get(args, "design-cyclic", "false"))) in ("1", "true", "t", "yes", "y", "on")
+        design_cyclic_period = design_cyclic ? length(d_tokens) : 0
         for (k, tok) in enumerate(d_tokens)
             push!(residues, tok)
             push!(mol_types, d_mol_type)
             push!(asym_ids, new_asym)
             push!(entity_ids, new_asym)
             push!(sym_ids, 0)
+            push!(cyclic_period, design_cyclic_period)
             push!(chain_labels, "DESIGN")
             push!(residue_indices, next_res + k - 1)
             push!(token_atom_names_override, String[])
@@ -221,6 +225,7 @@ function main()
         asym_ids=asym_ids,
         entity_ids=entity_ids,
         sym_ids=sym_ids,
+        cyclic_period=cyclic_period,
         residue_indices=residue_indices,
         design_mask=design_mask,
         structure_group=structure_group,

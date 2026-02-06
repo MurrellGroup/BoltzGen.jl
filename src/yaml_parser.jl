@@ -367,6 +367,10 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     asym_ids = copy(parsed.asym_ids)
     entity_ids = copy(parsed.entity_ids)
     sym_ids = copy(parsed.sym_ids)
+    sym_group_override = _ydict_get(spec, "symmetric_group", nothing)
+    if sym_group_override !== nothing
+        sym_ids .= Int(sym_group_override)
+    end
     residue_indices = copy(parsed.residue_indices)
     chain_labels = copy(parsed.chain_labels)
     token_atom_names = copy(parsed.token_atom_names)
@@ -1085,33 +1089,43 @@ function parse_design_yaml(
             end
 
             bonds = NTuple{3, Int}[]
+            function add_bond_constraint!(b)
+                a1 = _as_list(_ydict_get(b, "atom1", nothing))
+                a2 = _as_list(_ydict_get(b, "atom2", nothing))
+                length(a1) >= 2 || return
+                length(a2) >= 2 || return
+
+                c1 = _resolve_constraint_chain(string(a1[1]), chain_aliases)
+                c2 = _resolve_constraint_chain(string(a2[1]), chain_aliases)
+                r1 = Int(a1[2])
+                r2 = Int(a2[2])
+
+                haskey(token_idxs_by_chain, c1) || error("Constraint chain not found: $c1")
+                haskey(token_idxs_by_chain, c2) || error("Constraint chain not found: $c2")
+                idxs1 = token_idxs_by_chain[c1]
+                idxs2 = token_idxs_by_chain[c2]
+                1 <= r1 <= length(idxs1) || error("Constraint residue index out of range for chain $c1: $r1")
+                1 <= r2 <= length(idxs2) || error("Constraint residue index out of range for chain $c2: $r2")
+
+                t1 = idxs1[r1]
+                t2 = idxs2[r2]
+                bt_name = _upper(_ydict_get(b, "bondtype", "COVALENT"))
+                bt_id = get(bond_type_ids, bt_name, get(bond_type_ids, "COVALENT", 1))
+                push!(bonds, (t1, t2, bt_id))
+            end
+
             constraints = _ydict_get(schema, "constraints", nothing)
             if constraints !== nothing
                 for c in _as_list(constraints)
                     b = _ydict_get(c, "bond", nothing)
-                    b === nothing && continue
-                    a1 = _as_list(_ydict_get(b, "atom1", nothing))
-                    a2 = _as_list(_ydict_get(b, "atom2", nothing))
-                    length(a1) >= 2 || continue
-                    length(a2) >= 2 || continue
+                    b === nothing || add_bond_constraint!(b)
+                end
+            end
 
-                    c1 = _resolve_constraint_chain(string(a1[1]), chain_aliases)
-                    c2 = _resolve_constraint_chain(string(a2[1]), chain_aliases)
-                    r1 = Int(a1[2])
-                    r2 = Int(a2[2])
-
-                    haskey(token_idxs_by_chain, c1) || error("Constraint chain not found: $c1")
-                    haskey(token_idxs_by_chain, c2) || error("Constraint chain not found: $c2")
-                    idxs1 = token_idxs_by_chain[c1]
-                    idxs2 = token_idxs_by_chain[c2]
-                    1 <= r1 <= length(idxs1) || error("Constraint residue index out of range for chain $c1: $r1")
-                    1 <= r2 <= length(idxs2) || error("Constraint residue index out of range for chain $c2: $r2")
-
-                    t1 = idxs1[r1]
-                    t2 = idxs2[r2]
-                    bt_name = _upper(_ydict_get(b, "bondtype", "COVALENT"))
-                    bt_id = get(bond_type_ids, bt_name, get(bond_type_ids, "COVALENT", 1))
-                    push!(bonds, (t1, t2, bt_id))
+            schema_bonds = _ydict_get(schema, "bonds", nothing)
+            if schema_bonds !== nothing
+                for b in _as_list(schema_bonds)
+                    add_bond_constraint!(_ydict_get(b, "bond", b))
                 end
             end
 
