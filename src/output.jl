@@ -58,6 +58,11 @@ const simple_element_to_atomic_num = Dict(
     "S" => 16,
 )
 
+const PDB_COORD_MIN = -999.999f0
+const PDB_COORD_MAX = 9999.999f0
+
+_clip_pdb_coord(x::Real) = clamp(Float32(x), PDB_COORD_MIN, PDB_COORD_MAX)
+
 function _res_name_from_onehot(res_type_vec)
     idx = argmax(res_type_vec)
     return tokens[idx]
@@ -175,6 +180,7 @@ function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
         atom_serial = 1
         M = size(coords_b, 2)
         skipped = 0
+        clipped = 0
         for m in 1:M
             atom_pad_mask[m] > 0.5 || continue
             token_idx = argmax(view(atom_to_token, m, :))
@@ -187,12 +193,18 @@ function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
             element = _element_from_atom_name(atom_name)
             record = (Int(mol_type[token_idx]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
 
-            x = coords_b[1, m]
-            y = coords_b[2, m]
-            z = coords_b[3, m]
+            x_raw = coords_b[1, m]
+            y_raw = coords_b[2, m]
+            z_raw = coords_b[3, m]
+            x = _clip_pdb_coord(x_raw)
+            y = _clip_pdb_coord(y_raw)
+            z = _clip_pdb_coord(z_raw)
             if !isfinite(x) || !isfinite(y) || !isfinite(z)
                 skipped += 1
                 continue
+            end
+            if x != x_raw || y != y_raw || z != z_raw
+                clipped += 1
             end
 
             @printf(
@@ -215,6 +227,9 @@ function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
         end
         if skipped > 0
             @printf(io, "REMARK Skipped %d atoms due to padding/NaNs\n", skipped)
+        end
+        if clipped > 0
+            @printf(io, "REMARK Clipped %d coordinates to PDB range [%.3f, %.3f]\n", clipped, PDB_COORD_MIN, PDB_COORD_MAX)
         end
         println(io, "END")
     end
