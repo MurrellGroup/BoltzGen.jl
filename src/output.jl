@@ -70,6 +70,12 @@ function _element_from_atom_name(atom_name::String)
     return uppercase(stripped[1:1])
 end
 
+function _is_fake_or_mask_atom(atom_name::String)
+    u = uppercase(strip(atom_name))
+    # Match upstream mmCIF writer behavior: skip fake/masked atom labels.
+    return startswith(u, "LV") || startswith(u, "FL")
+end
+
 function _elem_from_name_simple(atom_name::String)
     stripped = replace(atom_name, r"[0-9]" => "")
     stripped = strip(stripped)
@@ -177,6 +183,7 @@ function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
             res_seq = Int(residue_index[token_idx]) + res_offset
             chain_id = chain_id_from_asym(Int(asym_id[token_idx]))
             atom_name = decode_atom_name_chars(view(ref_atom_name_chars, :, :, m))
+            _is_fake_or_mask_atom(atom_name) && (skipped += 1; continue)
             element = _element_from_atom_name(atom_name)
             record = (Int(mol_type[token_idx]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
 
