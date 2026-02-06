@@ -113,17 +113,24 @@ function parse_bonds(spec::AbstractString)
     return out
 end
 
-function require_sampling_checkpoint!(weights_path::AbstractString)
+function require_sampling_checkpoint!(weights_path::AbstractString; requires_design_conditioning::Bool=false)
     state = SafeTensors.load_safetensors(weights_path)
-    has_token_transformer = any(
-        startswith(k, "structure_module.score_model.token_transformer_layers.0.layers.")
-        for k in keys(state)
-    )
+    has_token_transformer = any(startswith(k, "structure_module.score_model.token_transformer_layers.0.layers.") for k in keys(state)) ||
+        any(startswith(k, "structure_module.score_model.token_transformer.layers.") for k in keys(state))
     if !has_token_transformer
         error(
             "Checkpoint lacks structure diffusion token-transformer weights and cannot be used for sampling: $weights_path. " *
             "Use a full structure checkpoint (e.g. boltzgen1_diverse) or a merged base+head checkpoint.",
         )
+    end
+    if requires_design_conditioning
+        has_design_conditioning = haskey(state, "input_embedder.design_mask_conditioning_init.weight")
+        if !has_design_conditioning
+            error(
+                "Checkpoint is missing design-conditioning weights and cannot perform de novo design sampling: $weights_path. " *
+                "Use a design checkpoint (e.g. boltzgen1_diverse or boltzgen1_adherence).",
+            )
+        end
     end
 end
 
@@ -160,7 +167,6 @@ function main()
     out_pdb37 = get(args, "out-pdb-atom37", default_base * "_atom37.pdb")
     out_cif = get(args, "out-cif", default_base * ".cif")
     weights_path = get(args, "weights", joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"))
-    require_sampling_checkpoint!(weights_path)
 
     mol_type_id = BoltzGen.chain_type_ids[chain_type]
     mol_types = fill(mol_type_id, T)
@@ -172,6 +178,7 @@ function main()
         # Length-based specs are de novo designed.
         isempty(sequence) ? trues(T) : falses(T)
     end
+    require_sampling_checkpoint!(weights_path; requires_design_conditioning=any(design_mask))
 
     target_msa_mask = if haskey(args, "target-msa-mask")
         parse_index_set(args["target-msa-mask"], T)
