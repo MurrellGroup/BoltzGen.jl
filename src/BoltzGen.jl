@@ -6,10 +6,12 @@ using Statistics
 using LinearAlgebra
 using Random
 using SafeTensors
+using YAML
 
 include("const.jl")
 include("utils.jl")
 include("features.jl")
+include("yaml_parser.jl")
 include("checkpoint.jl")
 include("transformers.jl")
 include("encoders.jl")
@@ -37,6 +39,7 @@ export build_design_features_from_structure
 export load_structure_tokens
 export load_msa_sequences
 export tokens_from_sequence
+export parse_design_yaml
 export infer_config
 export load_params!
 export load_model_from_state
