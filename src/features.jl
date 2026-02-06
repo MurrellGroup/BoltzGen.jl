@@ -974,9 +974,140 @@ function _split_cif_fields(line::AbstractString)
     return out
 end
 
-function _parse_structure_records(path::AbstractString)
+function _read_cif_loop_rows(lines::Vector{String}, start_row::Int, cols::Vector{String})
+    rows = Vector{Vector{String}}()
+    n = length(lines)
+    row = start_row
+    buffered = String[]
+    ncols = length(cols)
+    ncols == 0 && return rows, row
+    while row <= n
+        s = strip(lines[row])
+        if isempty(s) || s == "#" || s == "loop_" || startswith(s, "data_") || startswith(s, "_")
+            break
+        end
+        append!(buffered, _split_cif_fields(lines[row]))
+        while length(buffered) >= ncols
+            push!(rows, copy(buffered[1:ncols]))
+            buffered = buffered[(ncols + 1):end]
+        end
+        row += 1
+    end
+    return rows, row
+end
+
+_identity_oper() = (
+    m=(1f0, 0f0, 0f0, 0f0, 1f0, 0f0, 0f0, 0f0, 1f0),
+    v=(0f0, 0f0, 0f0),
+)
+
+function _matmul3(
+    a::NTuple{9, Float32},
+    b::NTuple{9, Float32},
+)::NTuple{9, Float32}
+    return (
+        a[1] * b[1] + a[2] * b[4] + a[3] * b[7],
+        a[1] * b[2] + a[2] * b[5] + a[3] * b[8],
+        a[1] * b[3] + a[2] * b[6] + a[3] * b[9],
+        a[4] * b[1] + a[5] * b[4] + a[6] * b[7],
+        a[4] * b[2] + a[5] * b[5] + a[6] * b[8],
+        a[4] * b[3] + a[5] * b[6] + a[6] * b[9],
+        a[7] * b[1] + a[8] * b[4] + a[9] * b[7],
+        a[7] * b[2] + a[8] * b[5] + a[9] * b[8],
+        a[7] * b[3] + a[8] * b[6] + a[9] * b[9],
+    )
+end
+
+function _matvec3(
+    m::NTuple{9, Float32},
+    v::NTuple{3, Float32},
+)::NTuple{3, Float32}
+    return (
+        m[1] * v[1] + m[2] * v[2] + m[3] * v[3],
+        m[4] * v[1] + m[5] * v[2] + m[6] * v[3],
+        m[7] * v[1] + m[8] * v[2] + m[9] * v[3],
+    )
+end
+
+_vecadd3(a::NTuple{3, Float32}, b::NTuple{3, Float32}) = (a[1] + b[1], a[2] + b[2], a[3] + b[3])
+
+function _compose_oper(op1, op2)
+    # Compose transforms for x'' = op2(op1(x))
+    return (
+        m=_matmul3(op2.m, op1.m),
+        v=_vecadd3(_matvec3(op2.m, op1.v), op2.v),
+    )
+end
+
+_apply_oper(op, xyz::NTuple{3, Float32}) = _vecadd3(_matvec3(op.m, xyz), op.v)
+
+function _expand_oper_token(token::AbstractString)
+    s = strip(String(token))
+    isempty(s) && return String[]
+    m_int = match(r"^(-?\d+)-(-?\d+)$", s)
+    if m_int !== nothing
+        a = parse(Int, m_int.captures[1])
+        b = parse(Int, m_int.captures[2])
+        step = a <= b ? 1 : -1
+        return [string(i) for i in a:step:b]
+    end
+    m_pref = match(r"^([A-Za-z_]+)(-?\d+)-([A-Za-z_]+)(-?\d+)$", s)
+    if m_pref !== nothing && m_pref.captures[1] == m_pref.captures[3]
+        pref = m_pref.captures[1]
+        a = parse(Int, m_pref.captures[2])
+        b = parse(Int, m_pref.captures[4])
+        step = a <= b ? 1 : -1
+        return [string(pref, i) for i in a:step:b]
+    end
+    return [s]
+end
+
+function _expand_oper_expression(expr::AbstractString)
+    s = replace(strip(String(expr)), " " => "")
+    isempty(s) && return Vector{Vector{String}}()
+    groups = String[]
+    if occursin("(", s)
+        i = firstindex(s)
+        n = lastindex(s)
+        while i <= n
+            if s[i] == '('
+                j = findnext(==(')'), s, nextind(s, i))
+                j === nothing && break
+                push!(groups, String(s[nextind(s, i):prevind(s, j)]))
+                i = nextind(s, j)
+            else
+                i = nextind(s, i)
+            end
+        end
+        isempty(groups) && push!(groups, s)
+    else
+        push!(groups, s)
+    end
+
+    combos = [String[]]
+    for group in groups
+        ops = String[]
+        for part in split(group, ',')
+            append!(ops, _expand_oper_token(part))
+        end
+        isempty(ops) && continue
+        next_combos = Vector{Vector{String}}()
+        for base in combos, op in ops
+            c = copy(base)
+            push!(c, op)
+            push!(next_combos, c)
+        end
+        combos = next_combos
+    end
+    return combos
+end
+
+function _parse_structure_records(path::AbstractString; use_assembly::Bool=false)
     p = lowercase(path)
     if endswith(p, ".pdb")
+        if use_assembly
+            @warn "use_assembly=true requested for PDB path $(path), but PDB assembly reconstruction is not implemented yet; using asymmetric unit records."
+        end
         keys = Tuple{String, Int, String, String}[]
         rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
         rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
@@ -1021,71 +1152,61 @@ function _parse_structure_records(path::AbstractString)
         rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
         rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
         rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+        assembly_rows = Tuple{String, String, String}[]
+        oper_map = Dict{String, NamedTuple{(:m, :v), Tuple{NTuple{9, Float32}, NTuple{3, Float32}}}}()
+        assembly_scalar = Dict{String, String}()
 
         lines = readlines(path)
         n = length(lines)
         i = 1
-        done_atom_loop = false
-        while i <= n && !done_atom_loop
+        while i <= n
             line = strip(lines[i])
-            if line == "loop_"
+            if startswith(line, "_pdbx_struct_assembly_gen.")
+                fields = _split_cif_fields(lines[i])
+                if length(fields) >= 2
+                    assembly_scalar[fields[1]] = fields[2]
+                end
+                i += 1
+                continue
+            elseif line == "loop_"
                 cols = String[]
                 j = i + 1
                 while j <= n && startswith(strip(lines[j]), "_")
                     push!(cols, strip(lines[j]))
                     j += 1
                 end
+                rows, row_after = _read_cif_loop_rows(lines, j, cols)
                 if any(startswith(c, "_atom_site.") for c in cols)
-                    col_idx = Dict{String, Int}()
-                    for (k, c) in enumerate(cols)
-                        col_idx[c] = k
-                    end
-                    function _col(fields, names::Vector{String}, default::String="")
+                    col_idx = Dict{String, Int}(c => k for (k, c) in enumerate(cols))
+                    col = (fields, names::Vector{String}, default::String="") -> begin
                         for name in names
                             if haskey(col_idx, name)
-                                idx = col_idx[name]
-                                if idx <= length(fields)
-                                    return fields[idx]
-                                end
+                                return fields[col_idx[name]]
                             end
                         end
                         return default
                     end
-                    row = j
-                    while row <= n
-                        s = strip(lines[row])
-                        if isempty(s) || s == "#" || s == "loop_" || startswith(s, "data_")
-                            break
-                        end
-                        startswith(s, "_") && break
-                        fields = _split_cif_fields(lines[row])
-                        if length(fields) < length(cols)
-                            row += 1
-                            continue
-                        end
-                        group = uppercase(strip(_col(fields, ["_atom_site.group_PDB"])))
+                    for fields in rows
+                        group = uppercase(strip(col(fields, ["_atom_site.group_PDB"])))
                         if !(group == "ATOM" || group == "HETATM")
-                            row += 1
                             continue
                         end
-                        model_num = _safeparse_int(_col(fields, ["_atom_site.pdbx_PDB_model_num"]), 1)
-                        model_num == 1 || (row += 1; continue)
-                        alt = strip(_col(fields, ["_atom_site.label_alt_id"], "."))
+                        model_num = _safeparse_int(col(fields, ["_atom_site.pdbx_PDB_model_num"]), 1)
+                        model_num == 1 || continue
+                        alt = strip(col(fields, ["_atom_site.label_alt_id"], "."))
                         if !(alt == "." || alt == "?" || alt == "A" || alt == "1")
-                            row += 1
                             continue
                         end
-                        atom_name = uppercase(strip(_col(fields, ["_atom_site.label_atom_id", "_atom_site.auth_atom_id"])))
-                        comp_id = uppercase(strip(_col(fields, ["_atom_site.label_comp_id", "_atom_site.auth_comp_id"])))
-                        chain = _normalize_chain_id(_col(fields, ["_atom_site.label_asym_id", "_atom_site.auth_asym_id"], "_"))
-                        seq_raw = _col(fields, ["_atom_site.label_seq_id", "_atom_site.auth_seq_id"], "0")
+                        atom_name = uppercase(strip(col(fields, ["_atom_site.label_atom_id", "_atom_site.auth_atom_id"])))
+                        comp_id = uppercase(strip(col(fields, ["_atom_site.label_comp_id", "_atom_site.auth_comp_id"])))
+                        chain = _normalize_chain_id(col(fields, ["_atom_site.label_asym_id", "_atom_site.auth_asym_id"], "_"))
+                        seq_raw = col(fields, ["_atom_site.label_seq_id", "_atom_site.auth_seq_id"], "0")
                         res_seq = _safeparse_int(seq_raw, 0)
-                        ins = strip(_col(fields, ["_atom_site.pdbx_PDB_ins_code"], ""))
-                        x = _safeparse_f32(_col(fields, ["_atom_site.Cartn_x"]), NaN32)
-                        y = _safeparse_f32(_col(fields, ["_atom_site.Cartn_y"]), NaN32)
-                        z = _safeparse_f32(_col(fields, ["_atom_site.Cartn_z"]), NaN32)
+                        ins = strip(col(fields, ["_atom_site.pdbx_PDB_ins_code"], ""))
+                        x = _safeparse_f32(col(fields, ["_atom_site.Cartn_x"]), NaN32)
+                        y = _safeparse_f32(col(fields, ["_atom_site.Cartn_y"]), NaN32)
+                        z = _safeparse_f32(col(fields, ["_atom_site.Cartn_z"]), NaN32)
                         if isempty(atom_name) || isempty(comp_id) || !isfinite(x) || !isfinite(y) || !isfinite(z)
-                            row += 1
                             continue
                         end
 
@@ -1100,14 +1221,152 @@ function _parse_structure_records(path::AbstractString)
                             push!(rec_atoms[key], atom_name)
                             rec_coords[key][atom_name] = (x, y, z)
                         end
-                        row += 1
                     end
-                    done_atom_loop = true
-                    i = row
+                    i = row_after
+                    continue
+                elseif any(startswith(c, "_pdbx_struct_oper_list.") for c in cols)
+                    col_idx = Dict{String, Int}(c => k for (k, c) in enumerate(cols))
+                    col = (fields, names::Vector{String}, default::String="") -> begin
+                        for name in names
+                            if haskey(col_idx, name)
+                                return fields[col_idx[name]]
+                            end
+                        end
+                        return default
+                    end
+                    for fields in rows
+                        op_id = strip(col(fields, ["_pdbx_struct_oper_list.id"]))
+                        isempty(op_id) && continue
+                        m11 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[1][1]"]), 1f0)
+                        m12 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[1][2]"]), 0f0)
+                        m13 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[1][3]"]), 0f0)
+                        m21 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[2][1]"]), 0f0)
+                        m22 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[2][2]"]), 1f0)
+                        m23 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[2][3]"]), 0f0)
+                        m31 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[3][1]"]), 0f0)
+                        m32 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[3][2]"]), 0f0)
+                        m33 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.matrix[3][3]"]), 1f0)
+                        v1 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.vector[1]"]), 0f0)
+                        v2 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.vector[2]"]), 0f0)
+                        v3 = _safeparse_f32(col(fields, ["_pdbx_struct_oper_list.vector[3]"]), 0f0)
+                        oper_map[op_id] = (
+                            m=(m11, m12, m13, m21, m22, m23, m31, m32, m33),
+                            v=(v1, v2, v3),
+                        )
+                    end
+                    i = row_after
+                    continue
+                elseif any(startswith(c, "_pdbx_struct_assembly_gen.") for c in cols)
+                    col_idx = Dict{String, Int}(c => k for (k, c) in enumerate(cols))
+                    col = (fields, names::Vector{String}, default::String="") -> begin
+                        for name in names
+                            if haskey(col_idx, name)
+                                return fields[col_idx[name]]
+                            end
+                        end
+                        return default
+                    end
+                    for fields in rows
+                        aid = strip(col(fields, ["_pdbx_struct_assembly_gen.assembly_id"]))
+                        op_expr = strip(col(fields, ["_pdbx_struct_assembly_gen.oper_expression"]))
+                        asym_list = strip(col(fields, ["_pdbx_struct_assembly_gen.asym_id_list"]))
+                        if isempty(aid) || isempty(op_expr) || isempty(asym_list)
+                            continue
+                        end
+                        push!(assembly_rows, (aid, op_expr, asym_list))
+                    end
+                    i = row_after
                     continue
                 end
+                i = row_after
+                continue
             end
             i += 1
+        end
+
+        if isempty(assembly_rows) &&
+           haskey(assembly_scalar, "_pdbx_struct_assembly_gen.assembly_id") &&
+           haskey(assembly_scalar, "_pdbx_struct_assembly_gen.oper_expression") &&
+           haskey(assembly_scalar, "_pdbx_struct_assembly_gen.asym_id_list")
+            push!(
+                assembly_rows,
+                (
+                    assembly_scalar["_pdbx_struct_assembly_gen.assembly_id"],
+                    assembly_scalar["_pdbx_struct_assembly_gen.oper_expression"],
+                    assembly_scalar["_pdbx_struct_assembly_gen.asym_id_list"],
+                ),
+            )
+        end
+
+        if use_assembly && !isempty(assembly_rows) && !isempty(oper_map)
+            selected_assembly = assembly_rows[1][1]
+            copy_idx_by_combo = Dict{String, Int}()
+            copy_op = Dict{Int, NamedTuple{(:m, :v), Tuple{NTuple{9, Float32}, NTuple{3, Float32}}}}()
+            copy_asym = Dict{Int, Set{String}}()
+            next_copy = 1
+
+            for (aid, op_expr, asym_expr) in assembly_rows
+                aid == selected_assembly || continue
+                combos = _expand_oper_expression(op_expr)
+                isempty(combos) && continue
+                asym_ids = [_normalize_chain_id(s) for s in split(asym_expr, ",") if !isempty(strip(s))]
+                isempty(asym_ids) && continue
+                for combo in combos
+                    combo_key = join(combo, "*")
+                    if !haskey(copy_idx_by_combo, combo_key)
+                        op = _identity_oper()
+                        valid = true
+                        for op_id in combo
+                            if !haskey(oper_map, op_id)
+                                valid = false
+                                break
+                            end
+                            op = _compose_oper(op, oper_map[op_id])
+                        end
+                        valid || continue
+                        copy_idx_by_combo[combo_key] = next_copy
+                        copy_op[next_copy] = op
+                        copy_asym[next_copy] = Set{String}()
+                        next_copy += 1
+                    end
+                    copy_idx = copy_idx_by_combo[combo_key]
+                    for asym in asym_ids
+                        push!(copy_asym[copy_idx], asym)
+                    end
+                end
+            end
+
+            if !isempty(copy_op)
+                old_keys = copy(keys)
+                old_atoms = rec_atoms
+                old_coords = rec_coords
+                old_het = rec_het
+                keys = Tuple{String, Int, String, String}[]
+                rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
+                rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
+                rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+
+                copy_ids = sort!(collect(Base.keys(copy_op)))
+                for copy_idx in copy_ids
+                    asym_set = copy_asym[copy_idx]
+                    op = copy_op[copy_idx]
+                    for key in old_keys
+                        chain, res_seq, ins, comp_id = key
+                        chain in asym_set || continue
+                        new_chain = string(chain, copy_idx)
+                        new_key = (new_chain, res_seq, ins, comp_id)
+                        coords_new = Dict{String, NTuple{3, Float32}}()
+                        atoms = old_atoms[key]
+                        for atom_name in atoms
+                            coords_new[atom_name] = _apply_oper(op, old_coords[key][atom_name])
+                        end
+                        push!(keys, new_key)
+                        rec_atoms[new_key] = copy(atoms)
+                        rec_coords[new_key] = coords_new
+                        rec_het[new_key] = old_het[key]
+                    end
+                end
+            end
         end
         return keys, rec_atoms, rec_coords, rec_het
     else
@@ -1121,10 +1380,7 @@ function load_structure_tokens(
     include_nonpolymer::Bool=false,
     use_assembly::Bool=false,
 )
-    if use_assembly
-        @warn "use_assembly=true requested for $(path), but assembly reconstruction is not implemented yet; using asymmetric unit records."
-    end
-    keys, rec_atoms, rec_coords, rec_het = _parse_structure_records(path)
+    keys, rec_atoms, rec_coords, rec_het = _parse_structure_records(path; use_assembly=use_assembly)
 
     keep_chain = nothing
     if include_chains !== nothing
