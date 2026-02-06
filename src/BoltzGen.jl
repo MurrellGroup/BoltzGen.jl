@@ -6,10 +6,12 @@ using Statistics
 using LinearAlgebra
 using Random
 using SafeTensors
+using NPZ
 
 include("const.jl")
 include("utils.jl")
 include("features.jl")
+include("python_feature_bridge.jl")
 include("checkpoint.jl")
 include("transformers.jl")
 include("encoders.jl")
@@ -37,6 +39,7 @@ export build_design_features_from_structure
 export load_structure_tokens
 export load_msa_sequences
 export tokens_from_sequence
+export load_python_feature_npz
 export infer_config
 export load_params!
 export load_model_from_state
