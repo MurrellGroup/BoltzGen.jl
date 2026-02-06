@@ -174,6 +174,10 @@ function main()
 
     mol_type_id = BoltzGen.chain_type_ids[chain_type]
     mol_types = fill(mol_type_id, T)
+    cyclic_period = zeros(Int, T)
+    if lowercase(strip(get(args, "cyclic", "false"))) in ("1", "true", "t", "yes", "y", "on")
+        cyclic_period .= T
+    end
 
     design_mask = if haskey(args, "design-mask")
         parse_index_set(args["design-mask"], T)
@@ -231,6 +235,7 @@ function main()
     feats = BoltzGen.build_design_features(
         residues;
         mol_types=mol_types,
+        cyclic_period=cyclic_period,
         design_mask=design_mask,
         binding_type=binding_labels,
         ss_type=ss_labels,

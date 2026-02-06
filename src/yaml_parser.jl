@@ -30,6 +30,23 @@ function _upper(x)
     return uppercase(strip(string(x)))
 end
 
+function _as_boolish(x, default::Bool=false)
+    if x === nothing
+        return default
+    elseif x isa Bool
+        return x
+    elseif x isa Integer
+        return Int(x) != 0
+    end
+    s = lowercase(strip(string(x)))
+    if s in ("1", "true", "t", "yes", "y", "on")
+        return true
+    elseif s in ("0", "false", "f", "no", "n", "off", "")
+        return false
+    end
+    return default
+end
+
 function _parse_index_spec(spec, chain_len::Int)
     if spec === nothing
         return collect(1:chain_len)
@@ -315,7 +332,11 @@ function _insert_token!(
     binding_type::Vector{Int},
     ss_type::Vector{Int},
     structure_group::Vector{Int},
+    target_msa_mask::Vector{Bool},
+    cyclic_period::Vector{Int},
     ss_insert_id::Int,
+    target_msa::Bool=false,
+    cyclic_p::Int=0,
 )
     insert!(residue_tokens, idx, tok)
     insert!(mol_types, idx, mt)
@@ -332,11 +353,14 @@ function _insert_token!(
     insert!(binding_type, idx, binding_type_ids["UNSPECIFIED"])
     insert!(ss_type, idx, ss_insert_id)
     insert!(structure_group, idx, 0)
+    insert!(target_msa_mask, idx, target_msa)
+    insert!(cyclic_period, idx, cyclic_p)
 end
 
 function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::Bool, rng::AbstractRNG)
     spec, path = _resolve_file_entity_spec(spec, base_dir, rng)
-    parsed = load_structure_tokens(path; include_nonpolymer=include_nonpolymer)
+    use_assembly = _as_boolish(_ydict_get(spec, "use_assembly", false), false)
+    parsed = load_structure_tokens(path; include_nonpolymer=include_nonpolymer, use_assembly=use_assembly)
 
     residue_tokens = copy(parsed.residue_tokens)
     mol_types = copy(parsed.mol_types)
@@ -347,6 +371,8 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     chain_labels = copy(parsed.chain_labels)
     token_atom_names = copy(parsed.token_atom_names)
     token_atom_coords = copy(parsed.token_atom_coords)
+    target_msa_mask = fill(_as_boolish(_ydict_get(spec, "msa", false), false), length(residue_tokens))
+    cyclic_period = zeros(Int, length(residue_tokens))
 
     n = length(residue_tokens)
     include_mask = trues(n)
@@ -566,6 +592,8 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
                     binding_type,
                     ss_type,
                     structure_group,
+                    target_msa_mask,
+                    cyclic_period,
                     ss_insert_id,
                 )
             end
@@ -587,6 +615,8 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     binding_type = binding_type[keep]
     ss_type = ss_type[keep]
     structure_group = structure_group[keep]
+    target_msa_mask = target_msa_mask[keep]
+    cyclic_period = cyclic_period[keep]
 
     reset_spec = _ydict_get(spec, "reset_res_index", nothing)
     if reset_spec !== nothing
@@ -597,6 +627,21 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             idxs = findall(==(string(cid)), chain_labels)
             for (k, idx) in enumerate(idxs)
                 residue_indices[idx] = k
+            end
+        end
+    end
+
+    cyc_spec = _ydict_get(spec, "add_cyclization", nothing)
+    if cyc_spec !== nothing
+        for e in _as_list(cyc_spec)
+            c = _ydict_get(e, "chain", e)
+            cid = _ydict_get(c, "id", nothing)
+            cid === nothing && error("Missing chain.id in add_cyclization")
+            idxs = findall(==(string(cid)), chain_labels)
+            !isempty(idxs) || continue
+            cyc_val = length(idxs)
+            for idx in idxs
+                cyclic_period[idx] = cyc_val
             end
         end
     end
@@ -615,6 +660,8 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
         binding_type=binding_type,
         ss_type=ss_type,
         structure_group=structure_group,
+        target_msa_mask=target_msa_mask,
+        cyclic_period=cyclic_period,
     )
 end
 
@@ -624,7 +671,24 @@ function _canonicalize_schema(schema)
     end
 
     # Support legacy single-file YAMLs without top-level entities.
-    file_keys = ("path", "include", "exclude", "include_proximity", "structure_groups", "design", "not_design", "binding_types", "secondary_structure", "design_insertions", "reset_res_index")
+    file_keys = (
+        "path",
+        "include",
+        "exclude",
+        "include_proximity",
+        "structure_groups",
+        "design",
+        "not_design",
+        "binding_types",
+        "secondary_structure",
+        "design_insertions",
+        "reset_res_index",
+        "fuse",
+        "use_assembly",
+        "msa",
+        "add_cyclization",
+        "symmetric_group",
+    )
     if schema isa AbstractDict && any(_ydict_get(schema, k, nothing) !== nothing for k in file_keys)
         file_spec = Dict{Any, Any}()
         for k in file_keys
@@ -638,6 +702,10 @@ function _canonicalize_schema(schema)
         constraints = _ydict_get(schema, "constraints", nothing)
         if constraints !== nothing
             out["constraints"] = constraints
+        end
+        leaving_atoms = _ydict_get(schema, "leaving_atoms", nothing)
+        if leaving_atoms !== nothing
+            out["leaving_atoms"] = leaving_atoms
         end
         return out
     end
@@ -696,6 +764,8 @@ function parse_design_yaml(
             binding_type = Int[]
             ss_type = Int[]
             structure_group = Int[]
+            target_msa_mask = Bool[]
+            cyclic_period = Int[]
 
             chain_aliases = Dict{String, Vector{String}}()
             used_chain_labels = Set{String}()
@@ -704,7 +774,9 @@ function parse_design_yaml(
                 if !haskey(chain_aliases, orig)
                     chain_aliases[orig] = String[]
                 end
-                push!(chain_aliases[orig], effective)
+                if !(effective in chain_aliases[orig])
+                    push!(chain_aliases[orig], effective)
+                end
             end
 
             function make_unique_chain_label(label::String)
@@ -734,34 +806,78 @@ function parse_design_yaml(
                 ent_binding_type,
                 ent_ss_type,
                 ent_structure_group,
+                ent_target_msa_mask,
+                ent_cyclic_period,
+                ent_sym_ids,
                 orig_chain_names::Vector{String},
+                fuse_target::Union{Nothing,String}=nothing,
             )
                 local_chain_map = Dict{String, String}()
-                for cname in orig_chain_names
-                    local_chain_map[cname] = make_unique_chain_label(cname)
-                    register_alias!(cname, local_chain_map[cname])
+                if fuse_target === nothing
+                    for cname in orig_chain_names
+                        local_chain_map[cname] = make_unique_chain_label(cname)
+                        register_alias!(cname, local_chain_map[cname])
+                    end
+                else
+                    fused_chain = _resolve_constraint_chain(string(fuse_target), chain_aliases)
+                    any(==(fused_chain), chain_labels) || error("Fuse target chain not found: $(fuse_target)")
+                    for cname in orig_chain_names
+                        local_chain_map[cname] = fused_chain
+                        register_alias!(cname, fused_chain)
+                    end
                 end
 
                 local_asym_map = Dict{String, Int}()
-                for cname in values(local_chain_map)
-                    local_asym_map[cname] = length(local_asym_map)
+                if fuse_target === nothing
+                    for cname in values(local_chain_map)
+                        local_asym_map[cname] = length(local_asym_map)
+                    end
                 end
 
-                next_asym_base = isempty(asym_ids) ? 0 : (maximum(asym_ids) + 1)
-                ent_id_base = next_asym_base
+                next_asym_base = if fuse_target === nothing
+                    isempty(asym_ids) ? 0 : (maximum(asym_ids) + 1)
+                else
+                    0
+                end
+                ent_id_base = if fuse_target === nothing
+                    next_asym_base
+                else
+                    0
+                end
+                fused_chain_offsets = Dict{String, Int}()
+                fused_chain_meta = Dict{String, NTuple{3,Int}}()  # asym, entity, sym
 
                 for i in eachindex(ent_residue_tokens)
                     c_orig = ent_chain_labels[i]
                     c_eff = local_chain_map[c_orig]
-                    a_local = local_asym_map[c_eff]
-                    a_global = next_asym_base + a_local
+                    a_global = 0
+                    ent_global = 0
+                    sym_global = 0
+                    res_idx_out = ent_residue_indices[i]
+                    if fuse_target === nothing
+                        a_local = local_asym_map[c_eff]
+                        a_global = next_asym_base + a_local
+                        ent_global = ent_id_base + a_local
+                        sym_global = ent_sym_ids[i]
+                    else
+                        if !haskey(fused_chain_meta, c_eff)
+                            idxs = findall(==(c_eff), chain_labels)
+                            !isempty(idxs) || error("Fuse target chain not found: $(c_eff)")
+                            first_idx = first(idxs)
+                            fused_chain_meta[c_eff] = (asym_ids[first_idx], entity_ids[first_idx], sym_ids[first_idx])
+                            fused_chain_offsets[c_eff] = maximum(residue_indices[idxs]) + 1
+                        end
+                        a_global, ent_global, sym_global = fused_chain_meta[c_eff]
+                        res_idx_out = fused_chain_offsets[c_eff]
+                        fused_chain_offsets[c_eff] += 1
+                    end
 
                     push!(residue_tokens, ent_residue_tokens[i])
                     push!(mol_types, ent_mol_types[i])
                     push!(asym_ids, a_global)
-                    push!(entity_ids, ent_id_base + a_local)
-                    push!(sym_ids, 0)
-                    push!(residue_indices, ent_residue_indices[i])
+                    push!(entity_ids, ent_global)
+                    push!(sym_ids, sym_global)
+                    push!(residue_indices, res_idx_out)
                     push!(chain_labels, c_eff)
                     push!(token_atom_names, ent_token_atom_names[i])
                     push!(token_atom_coords, ent_token_atom_coords[i])
@@ -769,6 +885,8 @@ function parse_design_yaml(
                     push!(binding_type, ent_binding_type[i])
                     push!(ss_type, ent_ss_type[i])
                     push!(structure_group, ent_structure_group[i])
+                    push!(target_msa_mask, ent_target_msa_mask[i])
+                    push!(cyclic_period, ent_cyclic_period[i])
                 end
             end
 
@@ -783,6 +901,11 @@ function parse_design_yaml(
                     seq === nothing && error("Missing sequence for $chain_type entity")
                     toks, dmask = _parse_polymer_sequence(string(seq), chain_type, rng)
                     n = length(toks)
+                    sym_group = Int(_ydict_get(spec, "symmetric_group", 0))
+                    msa_flag = _as_boolish(_ydict_get(spec, "msa", false), false)
+                    cyclic_flag = _as_boolish(_ydict_get(spec, "cyclic", false), false)
+                    cyclic_val = cyclic_flag ? n : 0
+                    fuse_target = _ydict_get(spec, "fuse", nothing)
                     btype = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), n)
                     sstype = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), n)
 
@@ -796,6 +919,9 @@ function parse_design_yaml(
                     ent_binding_type = Int[]
                     ent_ss_type = Int[]
                     ent_structure_group = Int[]
+                    ent_target_msa_mask = Bool[]
+                    ent_cyclic_period = Int[]
+                    ent_sym_ids = Int[]
 
                     mt = chain_type_ids[chain_type]
                     for id_any in ids
@@ -810,6 +936,9 @@ function parse_design_yaml(
                         append!(ent_binding_type, btype)
                         append!(ent_ss_type, sstype)
                         append!(ent_structure_group, fill(0, n))
+                        append!(ent_target_msa_mask, fill(msa_flag, n))
+                        append!(ent_cyclic_period, fill(cyclic_val, n))
+                        append!(ent_sym_ids, fill(sym_group, n))
                     end
 
                     append_entity!(
@@ -823,7 +952,11 @@ function parse_design_yaml(
                         ent_binding_type,
                         ent_ss_type,
                         ent_structure_group,
+                        ent_target_msa_mask,
+                        ent_cyclic_period,
+                        ent_sym_ids,
                         [string(x) for x in ids],
+                        fuse_target === nothing ? nothing : string(fuse_target),
                     )
 
                 elseif _ydict_get(e, "ligand", nothing) !== nothing
@@ -832,12 +965,14 @@ function parse_design_yaml(
                     isempty(ids) && error("Missing id for ligand entity")
                     smiles = _ydict_get(spec, "smiles", nothing)
                     ccd = _ydict_get(spec, "ccd", nothing)
+                    sym_group = Int(_ydict_get(spec, "symmetric_group", 0))
+                    fuse_target = _ydict_get(spec, "fuse", nothing)
 
                     toks = String[]
                     atom_names_src = Vector{Vector{String}}()
                     atom_coords_src = Vector{Dict{String,NTuple{3,Float32}}}()
                     if smiles !== nothing
-                        smiles_list = [strip(string(x)) for x in _as_list(smiles)]
+                        smiles_list = [String(strip(string(x))) for x in _as_list(smiles)]
                         lig = smiles_to_ligand_tokens(smiles_list)
                         toks = lig.tokens
                         atom_names_src = lig.token_atom_names
@@ -865,6 +1000,9 @@ function parse_design_yaml(
                     ent_binding_type = Int[]
                     ent_ss_type = Int[]
                     ent_structure_group = Int[]
+                    ent_target_msa_mask = Bool[]
+                    ent_cyclic_period = Int[]
+                    ent_sym_ids = Int[]
 
                     mt = chain_type_ids["NONPOLYMER"]
                     for id_any in ids
@@ -879,6 +1017,9 @@ function parse_design_yaml(
                         append!(ent_binding_type, btype)
                         append!(ent_ss_type, sstype)
                         append!(ent_structure_group, fill(0, n))
+                        append!(ent_target_msa_mask, fill(false, n))
+                        append!(ent_cyclic_period, fill(0, n))
+                        append!(ent_sym_ids, fill(sym_group, n))
                     end
 
                     append_entity!(
@@ -892,13 +1033,18 @@ function parse_design_yaml(
                         ent_binding_type,
                         ent_ss_type,
                         ent_structure_group,
+                        ent_target_msa_mask,
+                        ent_cyclic_period,
+                        ent_sym_ids,
                         [string(x) for x in ids],
+                        fuse_target === nothing ? nothing : string(fuse_target),
                     )
 
                 elseif _ydict_get(e, "file", nothing) !== nothing
                     spec = _ydict_get(e, "file", nothing)
                     parsed_file = _parse_file_entity(spec, base_dir, include_nonpolymer, rng)
                     orig_chain_names = unique(parsed_file.chain_labels)
+                    fuse_target = _ydict_get(spec, "fuse", nothing)
 
                     append_entity!(
                         parsed_file.residue_tokens,
@@ -911,7 +1057,11 @@ function parse_design_yaml(
                         parsed_file.binding_type,
                         parsed_file.ss_type,
                         parsed_file.structure_group,
+                        parsed_file.target_msa_mask,
+                        parsed_file.cyclic_period,
+                        parsed_file.sym_ids,
                         orig_chain_names,
+                        fuse_target === nothing ? nothing : string(fuse_target),
                     )
                 else
                     error("Unsupported entity in YAML: $(collect(keys(e)))")
@@ -959,7 +1109,37 @@ function parse_design_yaml(
 
                     t1 = idxs1[r1]
                     t2 = idxs2[r2]
-                    push!(bonds, (t1, t2, get(bond_type_ids, "COVALENT", 1)))
+                    bt_name = _upper(_ydict_get(b, "bondtype", "COVALENT"))
+                    bt_id = get(bond_type_ids, bt_name, get(bond_type_ids, "COVALENT", 1))
+                    push!(bonds, (t1, t2, bt_id))
+                end
+            end
+
+            leaving_atoms = _ydict_get(schema, "leaving_atoms", nothing)
+            if leaving_atoms !== nothing
+                for e in _as_list(leaving_atoms)
+                    a = _as_list(_ydict_get(e, "atom", nothing))
+                    length(a) >= 3 || continue
+                    c = _resolve_constraint_chain(string(a[1]), chain_aliases)
+                    ridx = Int(a[2])
+                    atom_name = strip(string(a[3]))
+
+                    haskey(token_idxs_by_chain, c) || error("Leaving-atom chain not found: $c")
+                    idxs = token_idxs_by_chain[c]
+                    1 <= ridx <= length(idxs) || error("Leaving-atom residue index out of range for chain $c: $ridx")
+                    t = idxs[ridx]
+
+                    # Remove both exact and upper-cased aliases for robustness.
+                    names = token_atom_names[t]
+                    upper_atom_name = uppercase(atom_name)
+                    deleteat!(names, findall(n -> uppercase(strip(n)) == upper_atom_name, names))
+
+                    coords = token_atom_coords[t]
+                    for key in collect(keys(coords))
+                        if uppercase(strip(key)) == upper_atom_name
+                            delete!(coords, key)
+                        end
+                    end
                 end
             end
 
@@ -977,7 +1157,8 @@ function parse_design_yaml(
                 binding_type=binding_type,
                 ss_type=ss_type,
                 structure_group=structure_group,
-                target_msa_mask=falses(T),
+                target_msa_mask=target_msa_mask,
+                cyclic_period=cyclic_period,
                 bonds=bonds,
             )
         catch err

@@ -130,6 +130,7 @@ function main()
         asym_ids=parsed.asym_ids,
         entity_ids=parsed.entity_ids,
         sym_ids=parsed.sym_ids,
+        cyclic_period=parsed.cyclic_period,
         residue_indices=parsed.residue_indices,
         design_mask=parsed.design_mask,
         binding_type=parsed.binding_type,

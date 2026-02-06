@@ -338,6 +338,7 @@ function build_design_features(
     asym_ids::Union{Nothing,Vector{Int}}=nothing,
     entity_ids::Union{Nothing,Vector{Int}}=nothing,
     sym_ids::Union{Nothing,Vector{Int}}=nothing,
+    cyclic_period::Union{Nothing,Vector{Int}}=nothing,
     residue_indices::Union{Nothing,Vector{Int}}=nothing,
     design_mask::Union{Nothing,AbstractVector{Bool}}=nothing,
     chain_design_mask::Union{Nothing,AbstractVector{Bool}}=nothing,
@@ -377,6 +378,7 @@ function build_design_features(
     asym_ids_v = asym_ids === nothing ? zeros(Int, T) : copy(asym_ids)
     entity_ids_v = entity_ids === nothing ? zeros(Int, T) : copy(entity_ids)
     sym_ids_v = sym_ids === nothing ? zeros(Int, T) : copy(sym_ids)
+    cyclic_period_v = cyclic_period === nothing ? zeros(Int, T) : copy(cyclic_period)
     residue_indices_v = residue_indices === nothing ? collect(0:T-1) : copy(residue_indices)
     design_mask_v = design_mask === nothing ? trues(T) : copy(design_mask)
 
@@ -389,6 +391,7 @@ function build_design_features(
     length(asym_ids_v) == T || error("asym_ids length mismatch")
     length(entity_ids_v) == T || error("entity_ids length mismatch")
     length(sym_ids_v) == T || error("sym_ids length mismatch")
+    length(cyclic_period_v) == T || error("cyclic_period length mismatch")
     length(residue_indices_v) == T || error("residue_indices length mismatch")
     length(design_mask_v) == T || error("design_mask length mismatch")
     length(binding_v) == T || error("binding_type length mismatch")
@@ -593,6 +596,7 @@ function build_design_features(
             feature_asym_id[t, b] = asym_ids_v[t]
             entity_id[t, b] = entity_ids_v[t]
             sym_id[t, b] = sym_ids_v[t]
+            cyclic[t, b] = cyclic_period_v[t]
             token_index[t, b] = t - 1
             residue_index[t, b] = residue_indices_v[t]
             feature_residue_index[t, b] = residue_indices_v[t]
@@ -1115,7 +1119,11 @@ function load_structure_tokens(
     path::AbstractString;
     include_chains::Union{Nothing, Vector{String}}=nothing,
     include_nonpolymer::Bool=false,
+    use_assembly::Bool=false,
 )
+    if use_assembly
+        @warn "use_assembly=true requested for $(path), but assembly reconstruction is not implemented yet; using asymmetric unit records."
+    end
     keys, rec_atoms, rec_coords, rec_het = _parse_structure_records(path)
 
     keep_chain = nothing
