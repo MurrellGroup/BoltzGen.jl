@@ -91,6 +91,103 @@ function _count_layers(keys, prefix::String)
     return length(idx)
 end
 
+function _has_prefix(keys, prefix::String)
+    p = prefix * "."
+    return any(startswith(k, p) for k in keys)
+end
+
+function _infer_confidence_model_args(state, state_keys, token_z::Int)
+    _has_prefix(state_keys, "confidence_module") || return nothing
+
+    conf_blocks = _count_layers(state_keys, "confidence_module.pairformer_stack.layers")
+    conf_heads_key = "confidence_module.pairformer_stack.layers.0.attention.proj_z.1.weight"
+    conf_pair_key = "confidence_module.pairformer_stack.layers.0.tri_att_start.linear.weight"
+    conf_num_heads = haskey(state, conf_heads_key) ? Int(size(state[conf_heads_key], 1)) : 16
+    conf_pair_heads = haskey(state, conf_pair_key) ? Int(size(state[conf_pair_key], 1)) : 4
+
+    plddt_key = "confidence_module.confidence_heads.to_plddt_logits.weight"
+    pde_key = "confidence_module.confidence_heads.to_pde_logits.weight"
+    pde_intra_key = "confidence_module.confidence_heads.to_pde_intra_logits.weight"
+    pae_key = "confidence_module.confidence_heads.to_pae_logits.weight"
+    pae_intra_key = "confidence_module.confidence_heads.to_pae_intra_logits.weight"
+    dist_key = "confidence_module.dist_bin_pairwise_embed.weight"
+
+    token_level_confidence = haskey(state, plddt_key) ? (size(state[plddt_key], 1) <= 64) : true
+    num_plddt_bins = if haskey(state, plddt_key)
+        token_level_confidence ? Int(size(state[plddt_key], 1)) : 50
+    else
+        50
+    end
+    num_pde_bins = haskey(state, pde_key) ? Int(size(state[pde_key], 1)) :
+        (haskey(state, pde_intra_key) ? Int(size(state[pde_intra_key], 1)) : 64)
+    num_pae_bins = haskey(state, pae_key) ? Int(size(state[pae_key], 1)) :
+        (haskey(state, pae_intra_key) ? Int(size(state[pae_intra_key], 1)) : 64)
+    use_separate_heads = haskey(state, pde_intra_key) || haskey(state, pae_intra_key) ||
+        haskey(state, "confidence_module.confidence_heads.to_pde_inter_logits.weight") ||
+        haskey(state, "confidence_module.confidence_heads.to_pae_inter_logits.weight")
+
+    add_s_to_z_prod = any(startswith(k, "confidence_module.s_to_z_prod_in1.") for k in state_keys)
+    add_s_input_to_s = any(startswith(k, "confidence_module.s_input_to_s.") for k in state_keys)
+    no_update_s = !any(startswith(k, "confidence_module.s_norm.") for k in state_keys)
+    add_z_input_to_z = any(startswith(k, "confidence_module.rel_pos.") for k in state_keys)
+
+    return Dict{Symbol,Any}(
+        :pairformer_args => Dict{Symbol,Any}(
+            :num_blocks => max(conf_blocks, 1),
+            :num_heads => conf_num_heads,
+            :pairwise_head_width => Int(token_z ÷ max(conf_pair_heads, 1)),
+            :pairwise_num_heads => conf_pair_heads,
+            :dropout => 0.0,
+            :post_layer_norm => false,
+            :activation_checkpointing => false,
+        ),
+        :num_dist_bins => haskey(state, dist_key) ? Int(size(state[dist_key], 1)) : 64,
+        :token_level_confidence => token_level_confidence,
+        :max_dist => 22,
+        :add_s_to_z_prod => add_s_to_z_prod,
+        :add_s_input_to_s => add_s_input_to_s,
+        :no_update_s => no_update_s,
+        :add_z_input_to_z => add_z_input_to_z,
+        :confidence_args => Dict{Symbol,Any}(
+            :num_plddt_bins => num_plddt_bins,
+            :num_pde_bins => num_pde_bins,
+            :num_pae_bins => num_pae_bins,
+            :use_separate_heads => use_separate_heads,
+        ),
+    )
+end
+
+function _infer_affinity_model_args(state, state_keys, prefix::String, token_s::Int, token_z::Int)
+    _has_prefix(state_keys, prefix) || return nothing
+
+    pair_prefix = prefix * ".pairformer_stack.layers"
+    aff_blocks = _count_layers(state_keys, pair_prefix)
+    aff_pair_key = prefix * ".pairformer_stack.layers.0.tri_att_start.linear.weight"
+    aff_pair_heads = haskey(state, aff_pair_key) ? Int(size(state[aff_pair_key], 1)) : 4
+    dist_key = prefix * ".dist_bin_pairwise_embed.weight"
+    aff_token_s_key = prefix * ".affinity_heads.to_affinity_pred_value.0.weight"
+    aff_token_s = haskey(state, aff_token_s_key) ? Int(size(state[aff_token_s_key], 2)) : token_s
+
+    return Dict{Symbol,Any}(
+        :pairformer_args => Dict{Symbol,Any}(
+            :num_blocks => max(aff_blocks, 1),
+            :pairwise_head_width => Int(token_z ÷ max(aff_pair_heads, 1)),
+            :pairwise_num_heads => aff_pair_heads,
+            :dropout => 0.0,
+            :post_layer_norm => false,
+            :activation_checkpointing => false,
+        ),
+        :transformer_args => Dict{Symbol,Any}(
+            :token_s => aff_token_s,
+            :num_blocks => 1,
+            :num_heads => 1,
+            :activation_checkpointing => false,
+        ),
+        :num_dist_bins => haskey(state, dist_key) ? Int(size(state[dist_key], 1)) : 64,
+        :max_dist => 22,
+    )
+end
+
 function infer_config(state::AbstractDict{String, <:AbstractArray})
     state_keys = collect(keys(state))
 
@@ -134,6 +231,12 @@ function infer_config(state::AbstractDict{String, <:AbstractArray})
     token_distance_num_bins = use_token_distances ? Int(size(state["token_distance_module.a_proj.weight"], 2) - 4 * token_z) : 0
     template_num_bins = use_templates ? Int(size(state["template_module.a_proj.weight"], 2) - (2 * 33 + 5)) : 0
 
+    confidence_model_args = _infer_confidence_model_args(state, state_keys, token_z)
+    affinity_model_args = _infer_affinity_model_args(state, state_keys, "affinity_module", token_s, token_z)
+    affinity_model_args1 = _infer_affinity_model_args(state, state_keys, "affinity_module1", token_s, token_z)
+    affinity_model_args2 = _infer_affinity_model_args(state, state_keys, "affinity_module2", token_s, token_z)
+    affinity_ensemble = !isnothing(affinity_model_args1) && !isnothing(affinity_model_args2)
+
     return Dict(
         :atom_s => atom_s,
         :atom_z => atom_z,
@@ -171,6 +274,11 @@ function infer_config(state::AbstractDict{String, <:AbstractArray})
         :token_layers => max(token_layers, 1),
         :dim_fourier => dim_fourier,
         :gaussian_random_3d_encoding_dim => gaussian_random_3d_encoding_dim,
+        :confidence_model_args => isnothing(confidence_model_args) ? Dict{Symbol,Any}() : confidence_model_args,
+        :affinity_ensemble => affinity_ensemble,
+        :affinity_model_args => isnothing(affinity_model_args) ? Dict{Symbol,Any}() : affinity_model_args,
+        :affinity_model_args1 => isnothing(affinity_model_args1) ? Dict{Symbol,Any}() : affinity_model_args1,
+        :affinity_model_args2 => isnothing(affinity_model_args2) ? Dict{Symbol,Any}() : affinity_model_args2,
     )
 end
 
@@ -282,7 +390,12 @@ function _build_model_from_config(cfg::AbstractDict{Symbol, <:Any}; confidence_p
         use_token_distances=cfg[:use_token_distances],
         use_kernels=false,
         confidence_prediction=confidence_prediction,
+        confidence_model_args=get(cfg, :confidence_model_args, Dict{Symbol,Any}()),
         affinity_prediction=affinity_prediction,
+        affinity_ensemble=get(cfg, :affinity_ensemble, false),
+        affinity_model_args=get(cfg, :affinity_model_args, Dict{Symbol,Any}()),
+        affinity_model_args1=get(cfg, :affinity_model_args1, Dict{Symbol,Any}()),
+        affinity_model_args2=get(cfg, :affinity_model_args2, Dict{Symbol,Any}()),
     )
 end
 
