@@ -5,6 +5,7 @@ Pkg.activate(joinpath(WORKSPACE_ROOT, "Onion.jl"))
 
 using Onion
 using SafeTensors
+using Random
 
 include(normpath(joinpath(@__DIR__, "..", "src", "BoltzGen.jl")))
 using .BoltzGen
@@ -109,6 +110,11 @@ end
 
 function main()
     args = parse_kv_args(ARGS)
+    if haskey(args, "seed")
+        seed = parse(Int, args["seed"])
+        Random.seed!(seed)
+        println("Using seed: ", seed)
+    end
     with_confidence = get(args, "with-confidence", "false") == "true"
     with_affinity = get(args, "with-affinity", "false") == "true"
     out_heads = get(args, "out-heads", "")
