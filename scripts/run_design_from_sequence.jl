@@ -137,11 +137,9 @@ end
 
 function main()
     args = parse_kv_args(ARGS)
-    if haskey(args, "seed")
-        seed = parse(Int, args["seed"])
-        Random.seed!(seed)
-        println("Using seed: ", seed)
-    end
+    seed = haskey(args, "seed") ? parse(Int, args["seed"]) : 1
+    Random.seed!(seed)
+    println("Using seed: ", seed)
     with_confidence = get(args, "with-confidence", "false") == "true"
     with_affinity = get(args, "with-affinity", "false") == "true"
     out_heads = get(args, "out-heads", "")

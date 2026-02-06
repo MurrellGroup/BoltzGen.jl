@@ -43,11 +43,9 @@ function main()
     with_confidence = length(ARGS) >= 6 ? (ARGS[6] == "1") : false
     with_affinity = length(ARGS) >= 7 ? (ARGS[7] == "1") : false
     out_heads = length(ARGS) >= 8 ? ARGS[8] : ""
-    if length(ARGS) >= 9
-        seed = parse(Int, ARGS[9])
-        Random.seed!(seed)
-        println("Using seed: ", seed)
-    end
+    seed = length(ARGS) >= 9 ? parse(Int, ARGS[9]) : 1
+    Random.seed!(seed)
+    println("Using seed: ", seed)
 
     model, _, missing = BoltzGen.load_model_from_safetensors(
         weights_path;
