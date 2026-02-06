@@ -1,0 +1,311 @@
+function normalize_state_key(key::String)
+    key = replace(key, ".proj_z.0." => ".proj_z_norm.")
+    key = replace(key, ".proj_z.1." => ".proj_z.")
+    key = replace(key, ".output_projection.0." => ".output_projection.")
+    key = replace(key, ".output_projection_linear." => ".output_projection.")
+    key = replace(key, ".fourier_embedding.proj." => ".fourier_embedding.")
+    key = replace(key, ".fourier_embed.proj." => ".fourier_embed.")
+    key = replace(key, ".token_transformer_layers.0." => ".token_transformer.")
+    return key
+end
+
+function _get_child(obj, token::AbstractString)
+    if occursin(r"^\d+$", token)
+        idx = parse(Int, token) + 1
+        if obj isa Tuple
+            return obj[idx]
+        elseif obj isa AbstractVector
+            return obj[idx]
+        else
+            return obj
+        end
+    end
+    return getfield(obj, Symbol(token))
+end
+
+function _assign_param!(model, key::String, value)
+    nk = normalize_state_key(key)
+    parts = split(nk, ".")
+    obj = model
+    for i in 1:length(parts)-1
+        obj = try
+            _get_child(obj, parts[i])
+        catch
+            return false
+        end
+    end
+    pname = parts[end]
+    target = if hasfield(typeof(obj), Symbol(pname))
+        getfield(obj, Symbol(pname))
+    elseif pname == "weight" && hasfield(typeof(obj), :w)
+        getfield(obj, :w)
+    elseif pname == "bias" && hasfield(typeof(obj), :b)
+        getfield(obj, :b)
+    else
+        return false
+    end
+
+    val = Float32.(value)
+    if obj isa BGEmbedding && pname == "weight"
+        if size(target) == size(val)
+            target .= val
+        elseif ndims(val) == 2 && size(target) == (size(val, 2), size(val, 1))
+            target .= permutedims(val, (2, 1))
+        else
+            error("shape mismatch for $nk: target=$(size(target)) val=$(size(val))")
+        end
+        return true
+    end
+
+    if size(target) != size(val)
+        error("shape mismatch for $nk: target=$(size(target)) val=$(size(val))")
+    end
+    target .= val
+    return true
+end
+
+function load_params!(model, state::AbstractDict{String, <:AbstractArray})
+    missing = String[]
+    for (k, v) in state
+        ok = _assign_param!(model, k, v)
+        ok || push!(missing, k)
+    end
+    return missing
+end
+
+function _count_layers(keys, prefix::String)
+    idx = Set{Int}()
+    prefix_dot = prefix * "."
+    for k in keys
+        startswith(k, prefix_dot) || continue
+        rest = k[length(prefix_dot)+1:end]
+        parts = split(rest, ".")
+        isempty(parts) && continue
+        num = try
+            parse(Int, parts[1])
+        catch
+            continue
+        end
+        push!(idx, num)
+    end
+    return length(idx)
+end
+
+function infer_config(state::AbstractDict{String, <:AbstractArray})
+    state_keys = collect(keys(state))
+
+    token_s = size(state["input_embedder.res_type_encoding.weight"], 1)
+    token_z = size(state["z_init_1.weight"], 1)
+    atom_s = size(state["input_embedder.atom_encoder.embed_atom_features.weight"], 1)
+    atom_feature_dim = size(state["input_embedder.atom_encoder.embed_atom_features.weight"], 2)
+    atom_z = size(state["input_embedder.atom_encoder.embed_atompair_ref_pos.weight"], 1)
+    num_bins = size(state["distogram_module.distogram.weight"], 1)
+
+    atom_encoder_depth = _count_layers(state_keys, "input_embedder.atom_attention_encoder.atom_encoder.diffusion_transformer.layers")
+    atom_encoder_heads = Int(size(state["input_embedder.atom_enc_proj_z.1.weight"], 1) ÷ max(atom_encoder_depth, 1))
+
+    msa_blocks = _count_layers(state_keys, "msa_module.layers")
+    pairformer_blocks = _count_layers(state_keys, "pairformer_module.layers")
+    template_blocks = _count_layers(state_keys, "template_module.pairformer.layers")
+    token_distance_blocks = _count_layers(state_keys, "token_distance_module.pairformer.layers")
+
+    pairformer_heads = size(state["pairformer_module.layers.0.attention.proj_z.1.weight"], 1)
+    pairwise_num_heads = size(state["pairformer_module.layers.0.tri_att_start.linear.weight"], 1)
+    pairwise_head_width = Int(token_z ÷ pairwise_num_heads)
+
+    atom_enc_heads_diff = Int(size(state["diffusion_conditioning.atom_enc_proj_z.0.1.weight"], 1))
+    atom_dec_heads_diff = Int(size(state["diffusion_conditioning.atom_dec_proj_z.0.1.weight"], 1))
+    atom_enc_depth_diff = _count_layers(state_keys, "diffusion_conditioning.atom_enc_proj_z")
+    atom_dec_depth_diff = _count_layers(state_keys, "diffusion_conditioning.atom_dec_proj_z")
+
+    token_transformer_depth = _count_layers(state_keys, "structure_module.score_model.token_transformer_layers.0.layers")
+    token_layers = _count_layers(state_keys, "structure_module.score_model.token_transformer_layers")
+
+    dim_fourier = size(state["structure_module.score_model.single_conditioner.fourier_embed.proj.weight"], 1)
+    gaussian_random_3d_encoding_dim = size(state["structure_module.score_model.atom_attention_encoder.r_to_q_trans.weight"], 2) - 3
+
+    use_templates = any(startswith.(state_keys, "template_module."))
+    use_token_distances = any(startswith.(state_keys, "token_distance_module."))
+    bond_type_feature = any(startswith.(state_keys, "token_bonds_type."))
+    msa_use_paired_feature = size(state["msa_module.msa_proj.weight"], 2) == (33 + 2 + 1)
+
+    token_distance_dim = use_token_distances ? size(state["token_distance_module.z_proj.weight"], 1) : token_z
+    template_dim = use_templates ? size(state["template_module.z_proj.weight"], 1) : token_z
+    token_distance_num_bins = use_token_distances ? Int(size(state["token_distance_module.a_proj.weight"], 2) - 4 * token_z) : 0
+    template_num_bins = use_templates ? Int(size(state["template_module.a_proj.weight"], 2) - (2 * 33 + 5)) : 0
+
+    return Dict(
+        :atom_s => atom_s,
+        :atom_z => atom_z,
+        :token_s => token_s,
+        :token_z => token_z,
+        :num_bins => num_bins,
+        :atom_feature_dim => atom_feature_dim,
+        :atoms_per_window_queries => 32,
+        :atoms_per_window_keys => 128,
+        :use_miniformer => false,
+        :bond_type_feature => bond_type_feature,
+        :use_templates => use_templates,
+        :use_token_distances => use_token_distances,
+        :pairformer_blocks => pairformer_blocks,
+        :pairformer_heads => pairformer_heads,
+        :pairwise_head_width => pairwise_head_width,
+        :pairwise_num_heads => pairwise_num_heads,
+        :msa_blocks => msa_blocks,
+        :msa_s => size(state["msa_module.s_proj.weight"], 1),
+        :msa_use_paired_feature => msa_use_paired_feature,
+        :template_blocks => template_blocks,
+        :template_dim => template_dim,
+        :template_num_bins => template_num_bins,
+        :token_distance_blocks => token_distance_blocks,
+        :token_distance_dim => token_distance_dim,
+        :token_distance_num_bins => token_distance_num_bins,
+        :atom_encoder_depth => atom_encoder_depth,
+        :atom_encoder_heads => atom_encoder_heads,
+        :score_atom_encoder_depth => atom_enc_depth_diff,
+        :score_atom_encoder_heads => atom_enc_heads_diff,
+        :score_atom_decoder_depth => atom_dec_depth_diff,
+        :score_atom_decoder_heads => atom_dec_heads_diff,
+        :token_transformer_depth => token_transformer_depth,
+        :token_transformer_heads => 16,
+        :token_layers => max(token_layers, 1),
+        :dim_fourier => dim_fourier,
+        :gaussian_random_3d_encoding_dim => gaussian_random_3d_encoding_dim,
+    )
+end
+
+function _build_model_from_config(cfg::AbstractDict{Symbol, <:Any}; confidence_prediction::Bool=false, affinity_prediction::Bool=false)
+    return BoltzModel(
+        cfg[:atom_s],
+        cfg[:atom_z],
+        cfg[:token_s],
+        cfg[:token_z],
+        cfg[:num_bins];
+        embedder_args=Dict(
+            :atoms_per_window_queries => cfg[:atoms_per_window_queries],
+            :atoms_per_window_keys => cfg[:atoms_per_window_keys],
+            :atom_feature_dim => cfg[:atom_feature_dim],
+            :atom_encoder_depth => cfg[:atom_encoder_depth],
+            :atom_encoder_heads => cfg[:atom_encoder_heads],
+            :add_method_conditioning => true,
+            :add_modified_flag => true,
+            :add_cyclic_flag => true,
+            :add_mol_type_feat => true,
+            :add_ph_flag => false,
+            :add_temp_flag => false,
+            :add_design_mask_flag => true,
+            :add_binding_specification => true,
+            :add_ss_specification => true,
+            :conditioning_cutoff_min => 4.0,
+            :conditioning_cutoff_max => 20.0,
+        ),
+        msa_args=Dict(
+            :msa_s => cfg[:msa_s],
+            :msa_blocks => cfg[:msa_blocks],
+            :msa_dropout => 0.15,
+            :z_dropout => 0.25,
+            :miniformer_blocks => false,
+            :pairwise_head_width => cfg[:pairwise_head_width],
+            :pairwise_num_heads => cfg[:pairwise_num_heads],
+            :use_paired_feature => cfg[:msa_use_paired_feature],
+            :activation_checkpointing => false,
+        ),
+        pairformer_args=Dict(
+            :num_blocks => cfg[:pairformer_blocks],
+            :num_heads => cfg[:pairformer_heads],
+            :dropout => 0.25,
+            :post_layer_norm => false,
+            :pairwise_head_width => cfg[:pairwise_head_width],
+            :pairwise_num_heads => cfg[:pairwise_num_heads],
+            :activation_checkpointing => false,
+        ),
+        score_model_args=Dict(
+            :sigma_data => 16.0,
+            :dim_fourier => cfg[:dim_fourier],
+            :atom_encoder_depth => cfg[:score_atom_encoder_depth],
+            :atom_encoder_heads => cfg[:score_atom_encoder_heads],
+            :token_layers => cfg[:token_layers],
+            :token_transformer_depth => cfg[:token_transformer_depth],
+            :token_transformer_heads => cfg[:token_transformer_heads],
+            :atom_decoder_depth => cfg[:score_atom_decoder_depth],
+            :atom_decoder_heads => cfg[:score_atom_decoder_heads],
+            :conditioning_transition_layers => 2,
+            :gaussian_random_3d_encoding_dim => cfg[:gaussian_random_3d_encoding_dim],
+            :transformer_post_ln => false,
+            :activation_checkpointing => false,
+        ),
+        diffusion_process_args=Dict(
+            :sigma_min => 0.0004,
+            :sigma_max => 160.0,
+            :sigma_data => 16.0,
+            :rho => 7.0,
+            :P_mean => -1.2,
+            :P_std => 1.5,
+            :gamma_0 => 0.8,
+            :gamma_min => 1.0,
+            :noise_scale => 0.95,
+            :step_scale => 1.8,
+            :mse_rotational_alignment => true,
+            :coordinate_augmentation => true,
+            :alignment_reverse_diff => true,
+            :synchronize_sigmas => false,
+            :sampling_schedule => "dilated",
+            :time_dilation => 2.667,
+            :time_dilation_start => 0.6,
+            :time_dilation_end => 0.8,
+        ),
+        token_distance_args=Dict(
+            :token_distance_dim => cfg[:token_distance_dim],
+            :token_distance_blocks => cfg[:token_distance_blocks],
+            :pairwise_head_width => cfg[:pairwise_head_width],
+            :pairwise_num_heads => cfg[:pairwise_num_heads],
+            :min_dist => 3.25,
+            :max_dist => 50.75,
+            :num_bins => cfg[:token_distance_num_bins],
+            :distance_gaussian_dim => 32,
+            :miniformer_blocks => false,
+            :use_token_distance_feats => true,
+        ),
+        template_args=Dict(
+            :template_dim => cfg[:template_dim],
+            :template_blocks => cfg[:template_blocks],
+            :pairwise_head_width => cfg[:pairwise_head_width],
+            :pairwise_num_heads => cfg[:pairwise_num_heads],
+            :min_dist => 3.25,
+            :max_dist => 50.75,
+            :num_bins => cfg[:template_num_bins],
+            :miniformer_blocks => false,
+        ),
+        use_miniformer=cfg[:use_miniformer],
+        bond_type_feature=cfg[:bond_type_feature],
+        use_templates=cfg[:use_templates],
+        use_token_distances=cfg[:use_token_distances],
+        use_kernels=false,
+        confidence_prediction=confidence_prediction,
+        affinity_prediction=affinity_prediction,
+    )
+end
+
+function load_model_from_state(
+    state::AbstractDict{String, <:AbstractArray};
+    confidence_prediction::Bool=false,
+    affinity_prediction::Bool=false,
+)
+    cfg = infer_config(state)
+    model = _build_model_from_config(cfg; confidence_prediction=confidence_prediction, affinity_prediction=affinity_prediction)
+    missing = load_params!(model, state)
+    return model, cfg, missing
+end
+
+function load_model_from_safetensors(
+    path::AbstractString;
+    confidence_prediction::Bool=false,
+    affinity_prediction::Bool=false,
+)
+    state = SafeTensors.load_safetensors(path)
+    return load_model_from_state(
+        state;
+        confidence_prediction=confidence_prediction,
+        affinity_prediction=affinity_prediction,
+    )
+end
