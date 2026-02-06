@@ -8,6 +8,7 @@ using Random
 
 include("const.jl")
 include("utils.jl")
+include("features.jl")
 include("transformers.jl")
 include("encoders.jl")
 include("trunk.jl")
@@ -24,5 +25,6 @@ export boltz_forward
 export write_pdb
 export postprocess_atom14
 export boltz_masker
+export build_denovo_atom14_features
 
 end
