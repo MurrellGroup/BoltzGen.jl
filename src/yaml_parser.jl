@@ -261,16 +261,35 @@ function _token_center(tok::String, mol_type_id::Int, atom_names::Vector{String}
     return (sx * invn, sy * invn, sz * invn)
 end
 
-function _resolve_yaml_path(path_raw, base_dir::AbstractString)
+function _resolve_yaml_path(path_raw, base_dir::AbstractString, rng::AbstractRNG)
     if path_raw isa AbstractVector
         isempty(path_raw) && error("Empty path list in YAML")
-        path_raw = path_raw[1]
+        path_raw = rand(rng, collect(path_raw))
     end
     p = string(path_raw)
     if isabspath(p)
         return normpath(p)
     end
     return normpath(joinpath(base_dir, p))
+end
+
+function _resolve_file_entity_spec(spec::AbstractDict, base_dir::AbstractString, rng::AbstractRNG)
+    current_spec = spec
+    current_base = base_dir
+
+    while true
+        path_raw = _ydict_get(current_spec, "path", nothing)
+        path = _resolve_yaml_path(path_raw, current_base, rng)
+        lower = lowercase(path)
+        if endswith(lower, ".yaml") || endswith(lower, ".yml")
+            nested = YAML.load_file(path)
+            nested isa AbstractDict || error("Nested file spec must be a YAML mapping: $(path)")
+            current_spec = nested
+            current_base = dirname(path)
+            continue
+        end
+        return current_spec, path
+    end
 end
 
 function _insert_token!(
@@ -316,7 +335,7 @@ function _insert_token!(
 end
 
 function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::Bool, rng::AbstractRNG)
-    path = _resolve_yaml_path(_ydict_get(spec, "path", nothing), base_dir)
+    spec, path = _resolve_file_entity_spec(spec, base_dir, rng)
     parsed = load_structure_tokens(path; include_nonpolymer=include_nonpolymer)
 
     residue_tokens = copy(parsed.residue_tokens)
