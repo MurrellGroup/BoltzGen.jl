@@ -1,0 +1,214 @@
+using Printf
+using LinearAlgebra
+
+const atom14_placement_count_to_token = Dict(
+    (0, 0, 0, 9) => "ALA",
+    (3, 0, 0, 0) => "ARG",
+    (1, 0, 0, 5) => "ASN",
+    (2, 0, 0, 4) => "ASP",
+    (0, 0, 0, 8) => "CYS",
+    (0, 0, 0, 5) => "GLN",
+    (2, 0, 0, 3) => "GLU",
+    (0, 0, 0, 10) => "GLY",
+    (0, 0, 0, 4) => "HIS",
+    (0, 0, 0, 6) => "ILE",
+    (4, 0, 0, 2) => "LEU",
+    (5, 0, 0, 0) => "LYS",
+    (6, 0, 0, 0) => "MET",
+    (0, 0, 0, 3) => "PHE",
+    (0, 0, 0, 7) => "PRO",
+    (8, 0, 0, 0) => "SER",
+    (3, 0, 0, 4) => "THR",
+    (0, 0, 0, 0) => "TRP",
+    (0, 0, 0, 2) => "TYR",
+    (7, 0, 0, 0) => "VAL",
+    (9, 0, 0, 0) => "UNK",
+)
+
+const atom14_ref_atoms = Dict(
+    "ALA" => ["N", "CA", "C", "O", "CB"],
+    "ARG" => ["N", "CA", "C", "O", "CB", "CG", "CD", "NE", "CZ", "NH1", "NH2"],
+    "ASN" => ["N", "CA", "C", "O", "CB", "CG", "OD1", "ND2"],
+    "ASP" => ["N", "CA", "C", "O", "CB", "CG", "OD1", "OD2"],
+    "CYS" => ["N", "CA", "C", "O", "CB", "SG"],
+    "GLN" => ["N", "CA", "C", "O", "CB", "CG", "CD", "OE1", "NE2"],
+    "GLU" => ["N", "CA", "C", "O", "CB", "CG", "CD", "OE1", "OE2"],
+    "GLY" => ["N", "CA", "C", "O"],
+    "HIS" => ["N", "CA", "C", "O", "CB", "CG", "ND1", "CD2", "CE1", "NE2"],
+    "ILE" => ["N", "CA", "C", "O", "CB", "CG1", "CG2", "CD1"],
+    "LEU" => ["N", "CA", "C", "O", "CB", "CG", "CD1", "CD2"],
+    "LYS" => ["N", "CA", "C", "O", "CB", "CG", "CD", "CE", "NZ"],
+    "MET" => ["N", "CA", "C", "O", "CB", "CG", "SD", "CE"],
+    "PHE" => ["N", "CA", "C", "O", "CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
+    "PRO" => ["N", "CA", "C", "O", "CB", "CG", "CD"],
+    "SER" => ["N", "CA", "C", "O", "CB", "OG"],
+    "THR" => ["N", "CA", "C", "O", "CB", "OG1", "CG2"],
+    "TRP" => ["N", "CA", "C", "O", "CB", "CG", "CD1", "CD2", "NE1", "CE2", "CE3", "CZ2", "CZ3", "CH2"],
+    "TYR" => ["N", "CA", "C", "O", "CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"],
+    "VAL" => ["N", "CA", "C", "O", "CB", "CG1", "CG2"],
+    "UNK" => ["N", "CA", "C", "O", "CB"],
+)
+
+const simple_element_to_atomic_num = Dict(
+    "H" => 1,
+    "C" => 6,
+    "N" => 7,
+    "O" => 8,
+    "P" => 15,
+    "S" => 16,
+)
+
+function _res_name_from_onehot(res_type_vec)
+    idx = argmax(res_type_vec)
+    return tokens[idx]
+end
+
+function _element_from_atom_name(atom_name::String)
+    stripped = replace(atom_name, r"[0-9]" => "")
+    stripped = strip(stripped)
+    isempty(stripped) && return "X"
+    return uppercase(stripped[1:1])
+end
+
+function _elem_from_name_simple(atom_name::String)
+    stripped = replace(atom_name, r"[0-9]" => "")
+    stripped = strip(stripped)
+    isempty(stripped) && return "C"
+    return uppercase(stripped[1:1])
+end
+
+function postprocess_atom14(feats::Dict, coords; threshold::Float32=0.5f0, invalid_token::String="UNK")
+    # This mirrors python's res_from_atom14 post-processing for design outputs.
+    new = copy(feats)
+    res_type = copy(feats["res_type"])
+    ref_atom_name_chars = copy(feats["ref_atom_name_chars"])
+    ref_element = copy(feats["ref_element"])
+
+    token_n = size(res_type, 2)
+    batch_n = size(res_type, 3)
+    atom_n = size(feats["atom_pad_mask"], 1)
+    protein_id = chain_type_ids["PROTEIN"]
+
+    coords_batched = ndims(coords) == 2 ? reshape(coords, size(coords, 1), size(coords, 2), 1) : coords
+
+    for b in 1:batch_n
+        token_design = (feats["design_mask"][:, b] .> 0.5) .& (feats["mol_type"][:, b] .== protein_id)
+        any(token_design) || continue
+
+        # Map each atom to its token by one-hot argmax.
+        atom_to_token = feats["atom_to_token"][:, :, b]
+        atom_token_idx = [argmax(view(atom_to_token, m, :)) for m in 1:atom_n]
+        atom_pad = feats["atom_pad_mask"][:, b] .> 0.5
+
+        for t in 1:token_n
+            token_design[t] || continue
+            atom_idxs = [m for m in 1:atom_n if atom_pad[m] && atom_token_idx[m] == t]
+            length(atom_idxs) < 14 && continue
+            atom_idxs = atom_idxs[1:14]
+
+            c = permutedims(coords_batched[:, atom_idxs, b], (2, 1)) # (14, 3)
+            bb = view(c, 1:4, :)
+            side = view(c, 5:14, :)
+            counts = zeros(Int, 4)
+            for j in 1:size(side, 1)
+                d = [norm(view(side, j, :) .- view(bb, i, :)) for i in 1:4]
+                min_d, min_i = findmin(d)
+                min_d <= threshold || continue
+                counts[min_i] += 1
+            end
+
+            token_name = get(atom14_placement_count_to_token, Tuple(counts), invalid_token)
+            token_idx = get(token_ids, token_name, token_ids["UNK"])
+            res_type[:, t, b] .= 0f0
+            res_type[token_idx, t, b] = 1f0
+
+            atom_names = get(atom14_ref_atoms, token_name, atom14_ref_atoms["UNK"])
+            for (i, atom_name) in enumerate(atom_names)
+                m = atom_idxs[i]
+                ref_atom_name_chars[:, :, m, b] .= encode_atom_name_chars(atom_name)
+                ref_element[:, m, b] .= 0f0
+                elem = _elem_from_name_simple(atom_name)
+                z = get(simple_element_to_atomic_num, elem, 6)
+                zidx = z + 1
+                if 1 <= zidx <= size(ref_element, 1)
+                    ref_element[zidx, m, b] = 1f0
+                end
+            end
+        end
+    end
+
+    new["res_type"] = res_type
+    new["ref_atom_name_chars"] = ref_atom_name_chars
+    new["ref_element"] = ref_element
+    return new
+end
+
+function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
+    # coords: (3, M) or (3, M, B)
+    coords_b = ndims(coords) == 2 ? coords : coords[:, :, batch]
+
+    atom_pad_mask = feats["atom_pad_mask"][:, batch]
+    atom_to_token = feats["atom_to_token"][:, :, batch]
+    res_type = feats["res_type"][:, :, batch]
+    residue_index = if haskey(feats, "residue_index")
+        feats["residue_index"][:, batch]
+    elseif haskey(feats, "feature_residue_index")
+        feats["feature_residue_index"][:, batch]
+    else
+        feats["token_index"][:, batch]
+    end
+    asym_id = feats["asym_id"][:, batch]
+    mol_type = feats["mol_type"][:, batch]
+    ref_atom_name_chars = feats["ref_atom_name_chars"][:, :, :, batch]
+    token_pad_mask = haskey(feats, "token_pad_mask") ? feats["token_pad_mask"][:, batch] : ones(Float32, size(res_type, 2))
+
+    # Adjust residue index to 1-based if needed for output.
+    res_offset = minimum(residue_index) <= 0 ? 1 : 0
+
+    open(path, "w") do io
+        atom_serial = 1
+        M = size(coords_b, 2)
+        skipped = 0
+        for m in 1:M
+            atom_pad_mask[m] > 0.5 || continue
+            token_idx = argmax(view(atom_to_token, m, :))
+            token_pad_mask[token_idx] > 0.5 || (skipped += 1; continue)
+            res_name = _res_name_from_onehot(view(res_type, :, token_idx))
+            res_seq = Int(residue_index[token_idx]) + res_offset
+            chain_id = chain_id_from_asym(Int(asym_id[token_idx]))
+            atom_name = decode_atom_name_chars(view(ref_atom_name_chars, :, :, m))
+            element = _element_from_atom_name(atom_name)
+            record = (Int(mol_type[token_idx]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
+
+            x = coords_b[1, m]
+            y = coords_b[2, m]
+            z = coords_b[3, m]
+            if !isfinite(x) || !isfinite(y) || !isfinite(z)
+                skipped += 1
+                continue
+            end
+
+            @printf(
+                io,
+                "%-6s%5d %-4s %3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %-2s\n",
+                record,
+                atom_serial,
+                atom_name,
+                res_name,
+                chain_id,
+                res_seq,
+                x,
+                y,
+                z,
+                1.00,
+                0.00,
+                element,
+            )
+            atom_serial += 1
+        end
+        if skipped > 0
+            @printf(io, "REMARK Skipped %d atoms due to padding/NaNs\n", skipped)
+        end
+        println(io, "END")
+    end
+end

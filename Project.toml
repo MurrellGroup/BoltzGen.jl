@@ -1,0 +1,15 @@
+name = "BoltzGen"
+uuid = "223087a6-b790-4d94-97cd-54b01bafc3a2"
+version = "0.1.0"
+
+[deps]
+Onion = "fdebf6c2-71da-43a1-b539-c3bc3e09c5c6"
+NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5c3"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-686f-5f34-9a43-1f3a9d6f9a6c"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
+
+[compat]
+NNlib = "0.9"
+Zygote = "0.6"
