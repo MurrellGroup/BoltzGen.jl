@@ -234,3 +234,158 @@ function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
         println(io, "END")
     end
 end
+
+function _token_metadata(feats::Dict, batch::Int)
+    res_type = feats["res_type"][:, :, batch]
+    residue_index = if haskey(feats, "residue_index")
+        feats["residue_index"][:, batch]
+    elseif haskey(feats, "feature_residue_index")
+        feats["feature_residue_index"][:, batch]
+    else
+        feats["token_index"][:, batch]
+    end
+    asym_id = feats["asym_id"][:, batch]
+    mol_type = feats["mol_type"][:, batch]
+    token_pad_mask = haskey(feats, "token_pad_mask") ? feats["token_pad_mask"][:, batch] : ones(Float32, size(res_type, 2))
+    res_offset = minimum(residue_index) <= 0 ? 1 : 0
+    return res_type, residue_index, asym_id, mol_type, token_pad_mask, res_offset
+end
+
+function collect_atom37_entries(feats::Dict, coords; batch::Int=1)
+    coords_b = ndims(coords) == 2 ? coords : coords[:, :, batch]
+    atom_pad_mask = feats["atom_pad_mask"][:, batch]
+    atom_to_token = feats["atom_to_token"][:, :, batch]
+    ref_atom_name_chars = feats["ref_atom_name_chars"][:, :, :, batch]
+    res_type, residue_index, asym_id, mol_type, token_pad_mask, res_offset = _token_metadata(feats, batch)
+
+    T = size(atom_to_token, 2)
+    token_atom_map = [Dict{String,NTuple{3,Float32}}() for _ in 1:T]
+
+    for m in 1:size(coords_b, 2)
+        atom_pad_mask[m] > 0.5 || continue
+        token_idx = argmax(view(atom_to_token, m, :))
+        token_pad_mask[token_idx] > 0.5 || continue
+
+        atom_name = decode_atom_name_chars(view(ref_atom_name_chars, :, :, m))
+        _is_fake_or_mask_atom(atom_name) && continue
+
+        x = coords_b[1, m]
+        y = coords_b[2, m]
+        z = coords_b[3, m]
+        (isfinite(x) && isfinite(y) && isfinite(z)) || continue
+
+        token_atom_map[token_idx][atom_name] = (Float32(x), Float32(y), Float32(z))
+    end
+
+    entries = NamedTuple[]
+    for t in 1:T
+        token_pad_mask[t] > 0.5 || continue
+        res_name = _res_name_from_onehot(view(res_type, :, t))
+        res_seq = Int(residue_index[t]) + res_offset
+        chain_id = chain_id_from_asym(Int(asym_id[t]))
+        record = (Int(mol_type[t]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
+        amap = token_atom_map[t]
+
+        ordered_atom_names = if Int(mol_type[t]) == chain_type_ids["PROTEIN"]
+            atom_types
+        else
+            get(ref_atoms, res_name, collect(keys(amap)))
+        end
+
+        for atom_name in ordered_atom_names
+            if haskey(amap, atom_name)
+                xyz = amap[atom_name]
+                push!(entries, (
+                    record=record,
+                    atom_name=atom_name,
+                    res_name=res_name,
+                    chain_id=chain_id,
+                    res_seq=res_seq,
+                    x=xyz[1],
+                    y=xyz[2],
+                    z=xyz[3],
+                    element=_element_from_atom_name(atom_name),
+                ))
+            end
+        end
+    end
+
+    return entries
+end
+
+function write_pdb_atom37(path::AbstractString, feats::Dict, coords; batch::Int=1)
+    entries = collect_atom37_entries(feats, coords; batch=batch)
+    open(path, "w") do io
+        clipped = 0
+        for (i, e) in enumerate(entries)
+            x = _clip_pdb_coord(e.x)
+            y = _clip_pdb_coord(e.y)
+            z = _clip_pdb_coord(e.z)
+            if x != e.x || y != e.y || z != e.z
+                clipped += 1
+            end
+            @printf(
+                io,
+                "%-6s%5d %-4s %3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %-2s\n",
+                e.record,
+                i,
+                e.atom_name,
+                e.res_name,
+                e.chain_id,
+                e.res_seq,
+                x,
+                y,
+                z,
+                1.00,
+                0.00,
+                e.element,
+            )
+        end
+        if clipped > 0
+            @printf(io, "REMARK Clipped %d coordinates to PDB range [%.3f, %.3f]\n", clipped, PDB_COORD_MIN, PDB_COORD_MAX)
+        end
+        println(io, "END")
+    end
+end
+
+function write_mmcif(path::AbstractString, feats::Dict, coords; batch::Int=1)
+    entries = collect_atom37_entries(feats, coords; batch=batch)
+    open(path, "w") do io
+        println(io, "data_generated")
+        println(io, "#")
+        println(io, "loop_")
+        println(io, "_atom_site.group_PDB")
+        println(io, "_atom_site.id")
+        println(io, "_atom_site.type_symbol")
+        println(io, "_atom_site.label_atom_id")
+        println(io, "_atom_site.label_comp_id")
+        println(io, "_atom_site.label_asym_id")
+        println(io, "_atom_site.label_seq_id")
+        println(io, "_atom_site.Cartn_x")
+        println(io, "_atom_site.Cartn_y")
+        println(io, "_atom_site.Cartn_z")
+        println(io, "_atom_site.occupancy")
+        println(io, "_atom_site.B_iso_or_equiv")
+        println(io, "_atom_site.pdbx_PDB_model_num")
+        for (i, e) in enumerate(entries)
+            @printf(
+                io,
+                "%s %d %s %s %s %s %d %.3f %.3f %.3f %.2f %.2f %d\n",
+                e.record,
+                i,
+                e.element,
+                e.atom_name,
+                e.res_name,
+                string(e.chain_id),
+                e.res_seq,
+                e.x,
+                e.y,
+                e.z,
+                1.00,
+                0.00,
+                1,
+            )
+        end
+        println(io, "#")
+    end
+end

@@ -25,9 +25,15 @@ include("boltz.jl")
 export BoltzModel
 export boltz_forward
 export write_pdb
+export write_pdb_atom37
+export write_mmcif
+export collect_atom37_entries
 export postprocess_atom14
 export boltz_masker
 export build_denovo_atom14_features
+export build_denovo_atom14_features_from_sequence
+export build_design_features
+export tokens_from_sequence
 export infer_config
 export load_params!
 export load_model_from_state
