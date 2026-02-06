@@ -62,6 +62,11 @@ function parse_chain_list(spec::AbstractString)
     return [String(strip(s)) for s in split(spec, ',') if !isempty(strip(s))]
 end
 
+function parse_string_list(spec::AbstractString)
+    isempty(strip(spec)) && return String[]
+    return [String(strip(s)) for s in split(spec, ',') if !isempty(strip(s))]
+end
+
 function design_tokens(args::Dict{String,String})
     chain_type = uppercase(get(args, "design-chain-type", "PROTEIN"))
     seq = get(args, "design-sequence", "")
@@ -82,6 +87,9 @@ end
 
 function main()
     args = parse_kv_args(ARGS)
+    with_confidence = get(args, "with-confidence", "false") == "true"
+    with_affinity = get(args, "with-affinity", "false") == "true"
+    out_heads = get(args, "out-heads", "")
     target_path = get(args, "target", "")
     isempty(target_path) && error("Missing --target <path-to-pdb-or-cif>")
 
@@ -131,6 +139,12 @@ function main()
     weights_path = get(args, "weights", joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"))
     steps = parse(Int, get(args, "steps", "100"))
     recycles = parse(Int, get(args, "recycles", "3"))
+    msa_file = get(args, "msa-file", "")
+    msa_max_rows = haskey(args, "msa-max-rows") ? parse(Int, args["msa-max-rows"]) : nothing
+    msa_sequences = isempty(msa_file) ? nothing : BoltzGen.load_msa_sequences(msa_file; max_rows=msa_max_rows)
+    template_paths = parse_string_list(get(args, "template-paths", ""))
+    template_max_count = haskey(args, "template-max-count") ? parse(Int, args["template-max-count"]) : nothing
+    template_chains = haskey(args, "template-chains") ? parse_chain_list(args["template-chains"]) : nothing
 
     out_prefix_default = begin
         base = splitext(basename(target_path))[1]
@@ -140,7 +154,11 @@ function main()
     out_pdb37 = get(args, "out-pdb-atom37", out_prefix_default * "_atom37.pdb")
     out_cif = get(args, "out-cif", out_prefix_default * ".cif")
 
-    model, _, missing = BoltzGen.load_model_from_safetensors(weights_path)
+    model, _, missing = BoltzGen.load_model_from_safetensors(
+        weights_path;
+        confidence_prediction=with_confidence,
+        affinity_prediction=with_affinity,
+    )
     if !isempty(missing)
         println("Unmapped state keys: ", length(missing))
     end
@@ -154,6 +172,11 @@ function main()
         residue_indices=residue_indices,
         design_mask=design_mask,
         structure_group=structure_group,
+        msa_sequences=msa_sequences,
+        max_msa_rows=msa_max_rows,
+        template_paths=template_paths,
+        max_templates=template_max_count,
+        template_include_chains=template_chains,
         batch=1,
         token_atom_names_override=token_atom_names_override,
         token_atom_coords_override=token_atom_coords_override,
@@ -196,6 +219,24 @@ function main()
     BoltzGen.write_pdb(out_pdb, feats_out, coords; batch=1)
     BoltzGen.write_pdb_atom37(out_pdb37, feats_out, coords; batch=1)
     BoltzGen.write_mmcif(out_cif, feats_out, coords; batch=1)
+
+    if !isempty(out_heads)
+        mkpath(dirname(out_heads))
+        open(out_heads, "w") do io
+            for k in (
+                "ptm", "iptm", "complex_plddt", "complex_iplddt",
+                "affinity_pred_value", "affinity_probability_binary",
+                "affinity_pred_value1", "affinity_probability_binary1",
+                "affinity_pred_value2", "affinity_probability_binary2",
+            )
+                if haskey(out, k)
+                    v = vec(Float32.(out[k]))
+                    println(io, k, "=", join(v, ","))
+                end
+            end
+        end
+        println("Wrote head summary: ", out_heads)
+    end
 
     println("Wrote PDB (atom14-like): ", out_pdb)
     println("Wrote PDB (atom37 mapped): ", out_pdb37)

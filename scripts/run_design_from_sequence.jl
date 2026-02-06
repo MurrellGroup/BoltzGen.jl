@@ -31,6 +31,11 @@ function parse_kv_args(args)
     return out
 end
 
+function parse_string_list(spec::AbstractString)
+    isempty(strip(spec)) && return String[]
+    return [String(strip(s)) for s in split(spec, ',') if !isempty(strip(s))]
+end
+
 function parse_index_set(spec::AbstractString, n::Int)
     mask = falses(n)
     isempty(strip(spec)) && return mask
@@ -109,6 +114,9 @@ end
 
 function main()
     args = parse_kv_args(ARGS)
+    with_confidence = get(args, "with-confidence", "false") == "true"
+    with_affinity = get(args, "with-affinity", "false") == "true"
+    out_heads = get(args, "out-heads", "")
 
     chain_type = uppercase(get(args, "chain-type", "PROTEIN"))
     sequence = get(args, "sequence", "")
@@ -177,8 +185,18 @@ function main()
 
     structure_groups = parse_structure_groups(get(args, "structure-group", ""), T)
     bonds = parse_bonds(get(args, "bonds", ""))
+    msa_file = get(args, "msa-file", "")
+    msa_max_rows = haskey(args, "msa-max-rows") ? parse(Int, args["msa-max-rows"]) : nothing
+    msa_sequences = isempty(msa_file) ? nothing : BoltzGen.load_msa_sequences(msa_file; max_rows=msa_max_rows)
+    template_paths = parse_string_list(get(args, "template-paths", ""))
+    template_max_count = haskey(args, "template-max-count") ? parse(Int, args["template-max-count"]) : nothing
+    template_chains = haskey(args, "template-chains") ? parse_string_list(args["template-chains"]) : nothing
 
-    model, _, missing = BoltzGen.load_model_from_safetensors(weights_path)
+    model, _, missing = BoltzGen.load_model_from_safetensors(
+        weights_path;
+        confidence_prediction=with_confidence,
+        affinity_prediction=with_affinity,
+    )
     if !isempty(missing)
         println("Unmapped state keys: ", length(missing))
     end
@@ -191,7 +209,12 @@ function main()
         ss_type=ss_labels,
         structure_group=structure_groups,
         target_msa_mask=target_msa_mask,
+        msa_sequences=msa_sequences,
+        max_msa_rows=msa_max_rows,
         affinity_token_mask=affinity_token_mask,
+        template_paths=template_paths,
+        max_templates=template_max_count,
+        template_include_chains=template_chains,
         bonds=bonds,
         batch=1,
     )
@@ -238,6 +261,24 @@ function main()
     BoltzGen.write_pdb(out_pdb, feats_out, coords; batch=1)
     BoltzGen.write_pdb_atom37(out_pdb37, feats_out, coords; batch=1)
     BoltzGen.write_mmcif(out_cif, feats_out, coords; batch=1)
+
+    if !isempty(out_heads)
+        mkpath(dirname(out_heads))
+        open(out_heads, "w") do io
+            for k in (
+                "ptm", "iptm", "complex_plddt", "complex_iplddt",
+                "affinity_pred_value", "affinity_probability_binary",
+                "affinity_pred_value1", "affinity_probability_binary1",
+                "affinity_pred_value2", "affinity_probability_binary2",
+            )
+                if haskey(out, k)
+                    v = vec(Float32.(out[k]))
+                    println(io, k, "=", join(v, ","))
+                end
+            end
+        end
+        println("Wrote head summary: ", out_heads)
+    end
 
     println("Wrote PDB (atom14-like): ", out_pdb)
     println("Wrote PDB (atom37 mapped): ", out_pdb37)

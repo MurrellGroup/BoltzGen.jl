@@ -198,7 +198,8 @@ function infer_config(state::AbstractDict{String, <:AbstractArray})
     atom_z = size(state["input_embedder.atom_encoder.embed_atompair_ref_pos.weight"], 1)
     num_bins = size(state["distogram_module.distogram.weight"], 1)
 
-    atom_encoder_depth = _count_layers(state_keys, "input_embedder.atom_attention_encoder.atom_encoder.diffusion_transformer.layers")
+    atom_encoder_depth_raw = _count_layers(state_keys, "input_embedder.atom_attention_encoder.atom_encoder.diffusion_transformer.layers")
+    atom_encoder_depth = atom_encoder_depth_raw > 0 ? atom_encoder_depth_raw : 3
     atom_encoder_heads = Int(size(state["input_embedder.atom_enc_proj_z.1.weight"], 1) ÷ max(atom_encoder_depth, 1))
 
     msa_blocks = _count_layers(state_keys, "msa_module.layers")
@@ -212,11 +213,15 @@ function infer_config(state::AbstractDict{String, <:AbstractArray})
 
     atom_enc_heads_diff = Int(size(state["diffusion_conditioning.atom_enc_proj_z.0.1.weight"], 1))
     atom_dec_heads_diff = Int(size(state["diffusion_conditioning.atom_dec_proj_z.0.1.weight"], 1))
-    atom_enc_depth_diff = _count_layers(state_keys, "diffusion_conditioning.atom_enc_proj_z")
-    atom_dec_depth_diff = _count_layers(state_keys, "diffusion_conditioning.atom_dec_proj_z")
+    atom_enc_depth_diff_raw = _count_layers(state_keys, "diffusion_conditioning.atom_enc_proj_z")
+    atom_dec_depth_diff_raw = _count_layers(state_keys, "diffusion_conditioning.atom_dec_proj_z")
+    atom_enc_depth_diff = atom_enc_depth_diff_raw > 0 ? atom_enc_depth_diff_raw : 3
+    atom_dec_depth_diff = atom_dec_depth_diff_raw > 0 ? atom_dec_depth_diff_raw : 3
 
-    token_transformer_depth = _count_layers(state_keys, "structure_module.score_model.token_transformer_layers.0.layers")
-    token_layers = _count_layers(state_keys, "structure_module.score_model.token_transformer_layers")
+    token_transformer_depth_raw = _count_layers(state_keys, "structure_module.score_model.token_transformer_layers.0.layers")
+    token_layers_raw = _count_layers(state_keys, "structure_module.score_model.token_transformer_layers")
+    token_transformer_depth = token_transformer_depth_raw > 0 ? token_transformer_depth_raw : 24
+    token_layers = token_layers_raw > 0 ? token_layers_raw : 1
 
     dim_fourier = size(state["structure_module.score_model.single_conditioner.fourier_embed.proj.weight"], 1)
     gaussian_random_3d_encoding_dim = size(state["structure_module.score_model.atom_attention_encoder.r_to_q_trans.weight"], 2) - 3
@@ -271,11 +276,12 @@ function infer_config(state::AbstractDict{String, <:AbstractArray})
         :score_atom_decoder_heads => atom_dec_heads_diff,
         :token_transformer_depth => token_transformer_depth,
         :token_transformer_heads => 16,
-        :token_layers => max(token_layers, 1),
+        :token_layers => token_layers,
         :dim_fourier => dim_fourier,
         :gaussian_random_3d_encoding_dim => gaussian_random_3d_encoding_dim,
         :confidence_model_args => isnothing(confidence_model_args) ? Dict{Symbol,Any}() : confidence_model_args,
         :affinity_ensemble => affinity_ensemble,
+        :affinity_mw_correction => affinity_ensemble,
         :affinity_model_args => isnothing(affinity_model_args) ? Dict{Symbol,Any}() : affinity_model_args,
         :affinity_model_args1 => isnothing(affinity_model_args1) ? Dict{Symbol,Any}() : affinity_model_args1,
         :affinity_model_args2 => isnothing(affinity_model_args2) ? Dict{Symbol,Any}() : affinity_model_args2,
@@ -393,6 +399,7 @@ function _build_model_from_config(cfg::AbstractDict{Symbol, <:Any}; confidence_p
         confidence_model_args=get(cfg, :confidence_model_args, Dict{Symbol,Any}()),
         affinity_prediction=affinity_prediction,
         affinity_ensemble=get(cfg, :affinity_ensemble, false),
+        affinity_mw_correction=get(cfg, :affinity_mw_correction, false),
         affinity_model_args=get(cfg, :affinity_model_args, Dict{Symbol,Any}()),
         affinity_model_args1=get(cfg, :affinity_model_args1, Dict{Symbol,Any}()),
         affinity_model_args2=get(cfg, :affinity_model_args2, Dict{Symbol,Any}()),

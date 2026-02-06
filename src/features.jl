@@ -75,6 +75,97 @@ function tokens_from_sequence(sequence::AbstractString; chain_type::String="PROT
     return out
 end
 
+function _msa_char_to_token(c::Char, mol_type_id::Int)
+    if c == '-'
+        return "-"
+    end
+
+    uc = uppercase(c)
+    if mol_type_id == chain_type_ids["PROTEIN"]
+        return get(prot_letter_to_token, uc, "UNK")
+    elseif mol_type_id == chain_type_ids["DNA"]
+        return get(dna_letter_to_token, uc, "DN")
+    elseif mol_type_id == chain_type_ids["RNA"]
+        return get(rna_letter_to_token, uc, "N")
+    end
+    return "UNK"
+end
+
+function _normalize_msa_row(row::AbstractString, T::Int)
+    aligned = Char[]
+    has_del = zeros(Float32, T)
+    del_val = zeros(Float32, T)
+
+    for c0 in String(row)
+        if isspace(c0)
+            continue
+        elseif c0 == '.'
+            # HHblits/A3M commonly uses '.' as a gap-like placeholder.
+            push!(aligned, '-')
+            continue
+        elseif islowercase(c0)
+            # Lowercase in A3M represents insertions relative to query.
+            if !isempty(aligned)
+                pos = min(length(aligned), T)
+                has_del[pos] = 1f0
+                del_val[pos] += 1f0
+            end
+            continue
+        end
+
+        c = uppercase(c0)
+        if c == '*'
+            c = 'X'
+        end
+        push!(aligned, c)
+    end
+
+    length(aligned) == T || error("MSA row has aligned length $(length(aligned)) but expected $T")
+    return String(aligned), has_del, del_val
+end
+
+function load_msa_sequences(path::AbstractString; max_rows::Union{Nothing, Int}=nothing)
+    isfile(path) || error("MSA file not found: $path")
+    lines = readlines(path)
+
+    rows = String[]
+    has_fasta_header = any(startswith(strip(line), ">") for line in lines)
+
+    if has_fasta_header
+        current = IOBuffer()
+        in_record = false
+        for raw in lines
+            line = strip(raw)
+            isempty(line) && continue
+            if startswith(line, ">")
+                if in_record
+                    push!(rows, String(take!(current)))
+                end
+                in_record = true
+                continue
+            end
+            in_record = true
+            print(current, line)
+        end
+        if in_record && position(current) > 0
+            push!(rows, String(take!(current)))
+        end
+    else
+        for raw in lines
+            line = strip(raw)
+            isempty(line) && continue
+            push!(rows, line)
+        end
+    end
+
+    isempty(rows) && error("No MSA rows found in file: $path")
+    if max_rows !== nothing
+        max_rows > 0 || error("max_rows must be positive")
+        rows = rows[1:min(end, max_rows)]
+    end
+    return rows
+end
+
 function _normalize_residue_token(token::AbstractString, mol_type_id::Int)
     t = uppercase(strip(String(token)))
     if haskey(token_ids, t)
@@ -184,6 +275,55 @@ function _frame_atom_indices(tok::String, mol_type_id::Int, atoms::Vector{String
     return idx_a, idx_b, idx_c, idx_d
 end
 
+function _safe_xyz(atom_coords::Dict{String, NTuple{3, Float32}}, atom_name::String)
+    if haskey(atom_coords, atom_name)
+        return atom_coords[atom_name], true
+    end
+    return (0f0, 0f0, 0f0), false
+end
+
+function _norm3(v::NTuple{3, Float32})
+    return sqrt(v[1]^2 + v[2]^2 + v[3]^2)
+end
+
+function _normalize3(v::NTuple{3, Float32})
+    n = _norm3(v)
+    if n <= 1f-8
+        return (0f0, 0f0, 0f0), false
+    end
+    return (v[1] / n, v[2] / n, v[3] / n), true
+end
+
+function _cross3(a::NTuple{3, Float32}, b::NTuple{3, Float32})
+    return (
+        a[2] * b[3] - a[3] * b[2],
+        a[3] * b[1] - a[1] * b[3],
+        a[1] * b[2] - a[2] * b[1],
+    )
+end
+
+function _sub3(a::NTuple{3, Float32}, b::NTuple{3, Float32})
+    return (a[1] - b[1], a[2] - b[2], a[3] - b[3])
+end
+
+function _template_frame_from_points(a::NTuple{3, Float32}, b::NTuple{3, Float32}, c::NTuple{3, Float32})
+    # Build a right-handed local frame with origin at b.
+    # Columns are basis vectors in global coordinates.
+    e1, ok1 = _normalize3(_sub3(c, b))
+    v2 = _sub3(a, b)
+    e3_raw = _cross3(e1, v2)
+    e3, ok3 = _normalize3(e3_raw)
+    e2 = _cross3(e3, e1)
+    if !(ok1 && ok3)
+        return Matrix{Float32}(I, 3, 3), b, false
+    end
+    rot = zeros(Float32, 3, 3)
+    rot[1, 1] = e1[1]; rot[2, 1] = e1[2]; rot[3, 1] = e1[3]
+    rot[1, 2] = e2[1]; rot[2, 2] = e2[2]; rot[3, 2] = e2[3]
+    rot[1, 3] = e3[1]; rot[2, 3] = e3[2]; rot[3, 3] = e3[3]
+    return rot, b, true
+end
+
 """
 Build conditioning-aware inference features in feature-first layout.
 
@@ -205,8 +345,17 @@ function build_design_features(
     ss_type::Union{Nothing,Vector{Int}}=nothing,
     structure_group::Union{Nothing,Vector{Int}}=nothing,
     target_msa_mask::Union{Nothing,AbstractVector{Bool}}=nothing,
+    msa_sequences::Union{Nothing,Vector{String}}=nothing,
+    msa_paired_rows::Union{Nothing,AbstractVector{Bool}}=nothing,
+    msa_mask_rows::Union{Nothing,AbstractMatrix{<:Real}}=nothing,
+    msa_has_deletion_rows::Union{Nothing,AbstractMatrix{<:Real}}=nothing,
+    msa_deletion_value_rows::Union{Nothing,AbstractMatrix{<:Real}}=nothing,
+    max_msa_rows::Union{Nothing,Int}=nothing,
     affinity_token_mask::Union{Nothing,AbstractVector{Bool}}=nothing,
     affinity_mw::Float32=0f0,
+    template_paths::Vector{String}=String[],
+    max_templates::Union{Nothing,Int}=nothing,
+    template_include_chains::Union{Nothing,Vector{String}}=nothing,
     bonds::Vector{NTuple{3,Int}}=NTuple{3,Int}[],
     contact_pairs::Vector{NTuple{3,Any}}=NTuple{3,Any}[],
     batch::Int=1,
@@ -285,8 +434,27 @@ function build_design_features(
 
     M_real = atom_counter
     M = _round_up_multiple(M_real, pad_atom_multiple)
-    S = 1
-    U = 1
+
+    msa_rows = msa_sequences === nothing ? nothing : copy(msa_sequences)
+    if msa_rows !== nothing
+        if max_msa_rows !== nothing
+            max_msa_rows > 0 || error("max_msa_rows must be positive")
+            msa_rows = msa_rows[1:min(end, max_msa_rows)]
+        end
+        isempty(msa_rows) && error("msa_sequences is empty after trimming")
+    end
+    S = msa_rows === nothing ? 1 : length(msa_rows)
+
+    template_paths_sel = copy(template_paths)
+    if max_templates !== nothing
+        max_templates > 0 || error("max_templates must be positive")
+        template_paths_sel = template_paths_sel[1:min(end, max_templates)]
+    end
+    template_parsed = Any[]
+    for p in template_paths_sel
+        push!(template_parsed, load_structure_tokens(p; include_chains=template_include_chains, include_nonpolymer=false))
+    end
+    U = isempty(template_parsed) ? 1 : length(template_parsed)
 
     token_pad_mask = ones(Float32, T, B)
     design_mask_arr = zeros(Int, T, B)
@@ -358,7 +526,58 @@ function build_design_features(
     token_to_bb4_atoms = zeros(Float32, 4 * T, M, B)
     frames_idx = zeros(Int, T, 3, B)
 
+    msa_ids_input = zeros(Int, S, T)
+    msa_mask_input = ones(Float32, S, T)
+    msa_paired_input = ones(Float32, S, T)
+    msa_has_deletion_input = zeros(Float32, S, T)
+    msa_deletion_value_input = zeros(Float32, S, T)
+
+    if msa_rows === nothing
+        for t in 1:T
+            msa_ids_input[1, t] = get(token_ids0, tokens_norm[t], token_ids0["UNK"])
+        end
+    else
+        for s in 1:S
+            row_norm, has_del_row, del_val_row = _normalize_msa_row(msa_rows[s], T)
+            for t in 1:T
+                tok = _msa_char_to_token(row_norm[t], mol_types_v[t])
+                msa_ids_input[s, t] = get(token_ids0, tok, token_ids0["UNK"])
+                msa_has_deletion_input[s, t] = has_del_row[t]
+                msa_deletion_value_input[s, t] = del_val_row[t]
+            end
+        end
+    end
+
+    if msa_paired_rows !== nothing
+        length(msa_paired_rows) == S || error("msa_paired_rows length mismatch")
+        for s in 1:S
+            v = msa_paired_rows[s] ? 1f0 : 0f0
+            msa_paired_input[s, :] .= v
+        end
+    end
+    if msa_mask_rows !== nothing
+        size(msa_mask_rows, 1) == S || error("msa_mask_rows row mismatch")
+        size(msa_mask_rows, 2) == T || error("msa_mask_rows token count mismatch")
+        msa_mask_input .= Float32.(msa_mask_rows)
+    end
+    if msa_has_deletion_rows !== nothing
+        size(msa_has_deletion_rows, 1) == S || error("msa_has_deletion_rows row mismatch")
+        size(msa_has_deletion_rows, 2) == T || error("msa_has_deletion_rows token count mismatch")
+        msa_has_deletion_input .= Float32.(msa_has_deletion_rows)
+    end
+    if msa_deletion_value_rows !== nothing
+        size(msa_deletion_value_rows, 1) == S || error("msa_deletion_value_rows row mismatch")
+        size(msa_deletion_value_rows, 2) == T || error("msa_deletion_value_rows token count mismatch")
+        msa_deletion_value_input .= Float32.(msa_deletion_value_rows)
+    end
+
     for b in 1:B
+        msa[:, :, b] .= msa_ids_input
+        msa_mask[:, :, b] .= msa_mask_input
+        msa_paired[:, :, b] .= msa_paired_input
+        has_deletion[:, :, b] .= msa_has_deletion_input
+        deletion_value[:, :, b] .= msa_deletion_value_input
+
         for t in 1:T
             tok = tokens_norm[t]
             tok_idx = get(token_ids, tok, token_ids["UNK"])
@@ -380,8 +599,6 @@ function build_design_features(
             target_msa_mask_arr[t, b] = target_msa_mask_v[t] ? 1f0 : 0f0
             binding_type_arr[t, b] = binding_v[t]
             ss_type_arr[t, b] = ss_v[t]
-
-            msa[1, t, b] = get(token_ids0, tok, token_ids0["UNK"])
 
             token_distance_mask[:, :, b] .= token_distance_mask_base
 
@@ -493,6 +710,100 @@ function build_design_features(
                 contact_conditioning[:, i, j, b] .= 0f0
                 contact_conditioning[contact_conditioning_info[ctype] + 1, i, j, b] = 1f0
             end
+        end
+
+        if !isempty(template_parsed)
+            for (u, tmpl_any) in enumerate(template_parsed)
+                tmpl = tmpl_any
+                L = min(T, length(tmpl.residue_tokens))
+                for t in 1:L
+                    tok_u = _normalize_residue_token(tmpl.residue_tokens[t], tmpl.mol_types[t])
+                    tok_idx_u = get(token_ids, tok_u, token_ids["UNK"])
+                    template_restype[:, t, u, b] .= 0f0
+                    _onehot_set!(template_restype[:, :, u, :], tok_idx_u, t, b)
+                    template_mask[t, u, b] = 1f0
+
+                    atoms_u = tmpl.token_atom_names[t]
+                    coords_u = tmpl.token_atom_coords[t]
+                    mol_u = tmpl.mol_types[t]
+
+                    ca_name = if mol_u == chain_type_ids["PROTEIN"]
+                        "CA"
+                    elseif mol_u == chain_type_ids["DNA"] || mol_u == chain_type_ids["RNA"]
+                        "C1'"
+                    else
+                        isempty(atoms_u) ? "" : atoms_u[1]
+                    end
+                    cb_name = get(res_to_disto_atom, tok_u, ca_name)
+
+                    ca_xyz, has_ca = _safe_xyz(coords_u, ca_name)
+                    cb_xyz, has_cb = _safe_xyz(coords_u, cb_name)
+                    if has_ca
+                        template_ca[1, t, u, b] = ca_xyz[1]
+                        template_ca[2, t, u, b] = ca_xyz[2]
+                        template_ca[3, t, u, b] = ca_xyz[3]
+                    end
+                    if has_cb
+                        template_cb[1, t, u, b] = cb_xyz[1]
+                        template_cb[2, t, u, b] = cb_xyz[2]
+                        template_cb[3, t, u, b] = cb_xyz[3]
+                        template_mask_cb[t, u, b] = 1f0
+                    elseif has_ca
+                        template_cb[1, t, u, b] = ca_xyz[1]
+                        template_cb[2, t, u, b] = ca_xyz[2]
+                        template_cb[3, t, u, b] = ca_xyz[3]
+                        template_mask_cb[t, u, b] = 1f0
+                    end
+
+                    if length(atoms_u) >= 3
+                        idx_a, idx_b, idx_c, _ = _frame_atom_indices(tok_u, mol_u, atoms_u)
+                        name_a = atoms_u[idx_a]
+                        name_b = atoms_u[idx_b]
+                        name_c = atoms_u[idx_c]
+                        xyz_a, has_a = _safe_xyz(coords_u, name_a)
+                        xyz_b, has_b = _safe_xyz(coords_u, name_b)
+                        xyz_c, has_c = _safe_xyz(coords_u, name_c)
+                        if has_a && has_b && has_c
+                            rot, trans, ok_frame = _template_frame_from_points(xyz_a, xyz_b, xyz_c)
+                            if ok_frame
+                                template_frame_rot[:, :, t, u, b] .= rot
+                                template_frame_t[1, t, u, b] = trans[1]
+                                template_frame_t[2, t, u, b] = trans[2]
+                                template_frame_t[3, t, u, b] = trans[3]
+                                template_mask_frame[t, u, b] = 1f0
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        for t in 1:T
+            profile[:, t, b] .= 0f0
+            denom = 0f0
+            del_sum = 0f0
+            for s in 1:S
+                w = msa_mask[s, t, b]
+                if w <= 0f0
+                    continue
+                end
+                idx = msa[s, t, b] + 1
+                if 1 <= idx <= num_tokens
+                    profile[idx, t, b] += w
+                end
+                del_sum += deletion_value[s, t, b] * w
+                denom += w
+            end
+            if denom > 1f-8
+                profile[:, t, b] ./= denom
+                deletion_mean[t, b] = del_sum / denom
+            else
+                tok_idx = get(token_ids, tokens_norm[t], token_ids["UNK"])
+                _onehot_set!(profile, tok_idx, t, b)
+                deletion_mean[t, b] = 0f0
+            end
+            profile_affinity[:, t, b] .= profile[:, t, b]
+            deletion_mean_affinity[t, b] = deletion_mean[t, b]
         end
     end
 
@@ -873,8 +1184,17 @@ function build_design_features_from_structure(
     ss_type::Union{Nothing, Vector{Int}}=nothing,
     structure_group::Union{Nothing, Vector{Int}}=nothing,
     target_msa_mask::Union{Nothing, AbstractVector{Bool}}=nothing,
+    msa_sequences::Union{Nothing,Vector{String}}=nothing,
+    msa_paired_rows::Union{Nothing,AbstractVector{Bool}}=nothing,
+    msa_mask_rows::Union{Nothing,AbstractMatrix{<:Real}}=nothing,
+    msa_has_deletion_rows::Union{Nothing,AbstractMatrix{<:Real}}=nothing,
+    msa_deletion_value_rows::Union{Nothing,AbstractMatrix{<:Real}}=nothing,
+    max_msa_rows::Union{Nothing,Int}=nothing,
     affinity_token_mask::Union{Nothing, AbstractVector{Bool}}=nothing,
     affinity_mw::Float32=0f0,
+    template_paths::Vector{String}=String[],
+    max_templates::Union{Nothing,Int}=nothing,
+    template_include_chains::Union{Nothing,Vector{String}}=nothing,
     bonds::Vector{NTuple{3, Int}}=NTuple{3, Int}[],
     contact_pairs::Vector{NTuple{3, Any}}=NTuple{3, Any}[],
     batch::Int=1,
@@ -898,8 +1218,17 @@ function build_design_features_from_structure(
         ss_type=ss_type,
         structure_group=groups_v,
         target_msa_mask=target_msa_mask,
+        msa_sequences=msa_sequences,
+        msa_paired_rows=msa_paired_rows,
+        msa_mask_rows=msa_mask_rows,
+        msa_has_deletion_rows=msa_has_deletion_rows,
+        msa_deletion_value_rows=msa_deletion_value_rows,
+        max_msa_rows=max_msa_rows,
         affinity_token_mask=affinity_token_mask,
         affinity_mw=affinity_mw,
+        template_paths=template_paths,
+        max_templates=max_templates,
+        template_include_chains=template_include_chains,
         bonds=bonds,
         contact_pairs=contact_pairs,
         batch=batch,
