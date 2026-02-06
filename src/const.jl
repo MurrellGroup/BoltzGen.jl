@@ -240,3 +240,6 @@ const res_to_disto_atom_id = Dict(res => findfirst(==(atom), ref_atoms[res]) for
 const num_elements = 128
 const mask_element_id = 114 # atomic number for FL in boltzgen.data.const
 const mask_element_index = mask_element_id + 1
+
+include("ref_pos_table.jl")
+include("ref_charge_table.jl")

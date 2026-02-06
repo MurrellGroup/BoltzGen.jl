@@ -144,7 +144,9 @@ function main()
     design_mask = if haskey(args, "design-mask")
         parse_index_set(args["design-mask"], T)
     else
-        trues(T)
+        # Match YAML semantics: explicit residue letters are fixed unless requested.
+        # Length-based specs are de novo designed.
+        isempty(sequence) ? trues(T) : falses(T)
     end
 
     target_msa_mask = if haskey(args, "target-msa-mask")

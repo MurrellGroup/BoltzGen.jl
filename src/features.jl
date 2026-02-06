@@ -139,6 +139,51 @@ function _propagate_chain_design_mask(design_mask::AbstractVector{Bool}, asym_id
     return out
 end
 
+function _find_atom_idx_or_default(atoms::Vector{String}, atom_name::String, default_idx::Int=1)
+    idx = findfirst(==(atom_name), atoms)
+    if idx === nothing
+        return clamp(default_idx, 1, max(length(atoms), 1))
+    end
+    return Int(idx)
+end
+
+function _frame_atom_indices(tok::String, mol_type_id::Int, atoms::Vector{String})
+    n = max(length(atoms), 1)
+    idx_a = 1
+    idx_b = 1
+    idx_c = 1
+    idx_d = 1
+
+    if length(atoms) < 3 || tok in ("<pad>", "UNK", "-", "DN", "N")
+        return idx_a, idx_b, idx_c, idx_d
+    end
+
+    if mol_type_id == chain_type_ids["PROTEIN"]
+        if haskey(ref_atoms, tok)
+            idx_a = _find_atom_idx_or_default(atoms, "N", 1)
+            idx_b = _find_atom_idx_or_default(atoms, "CA", min(2, n))
+            idx_c = _find_atom_idx_or_default(atoms, "C", min(3, n))
+            idx_d = _find_atom_idx_or_default(atoms, "O", idx_c)
+        else
+            idx_a = _find_atom_idx_or_default(atoms, "CA", 1)
+            idx_b = _find_atom_idx_or_default(atoms, "N", idx_a)
+            idx_c = _find_atom_idx_or_default(atoms, "C", idx_b)
+            idx_d = idx_a
+        end
+        return idx_a, idx_b, idx_c, idx_d
+    end
+
+    if mol_type_id == chain_type_ids["DNA"] || mol_type_id == chain_type_ids["RNA"]
+        idx_a = _find_atom_idx_or_default(atoms, "C1'", 1)
+        idx_b = _find_atom_idx_or_default(atoms, "C3'", idx_a)
+        idx_c = _find_atom_idx_or_default(atoms, "C4'", idx_b)
+        idx_d = _find_atom_idx_or_default(atoms, "P", idx_a)
+        return idx_a, idx_b, idx_c, idx_d
+    end
+
+    return idx_a, idx_b, idx_c, idx_d
+end
+
 """
 Build conditioning-aware inference features in feature-first layout.
 
@@ -254,7 +299,7 @@ function build_design_features(
     deletion_mean_affinity = zeros(Float32, T, B)
     msa = zeros(Int, S, T, B)
     msa_mask = ones(Float32, S, T, B)
-    msa_paired = zeros(Float32, S, T, B)
+    msa_paired = ones(Float32, S, T, B)
     has_deletion = zeros(Float32, S, T, B)
     deletion_value = zeros(Float32, S, T, B)
     target_msa_mask_arr = zeros(Float32, T, B)
@@ -341,6 +386,21 @@ function build_design_features(
                 atom_to_token[m, t, b] = 1f0
                 ref_space_uid[m, b] = t - 1
                 ref_atom_name_chars[:, :, m, b] .= encode_atom_name_chars(atom_name)
+                if haskey(ref_atom_pos, tok)
+                    tok_ref_pos = ref_atom_pos[tok]
+                    if haskey(tok_ref_pos, atom_name)
+                        xyz = tok_ref_pos[atom_name]
+                        ref_pos[1, m, b] = xyz[1]
+                        ref_pos[2, m, b] = xyz[2]
+                        ref_pos[3, m, b] = xyz[3]
+                    end
+                end
+                if haskey(ref_atom_charge, tok)
+                    tok_ref_charge = ref_atom_charge[tok]
+                    if haskey(tok_ref_charge, atom_name)
+                        ref_charge[m, b] = tok_ref_charge[atom_name]
+                    end
+                end
 
                 z = _atomic_num_from_atom_name(atom_name)
                 zidx = z + 1
@@ -368,29 +428,17 @@ function build_design_features(
                 token_to_rep_atom[t, rep_m, b] = 1f0
             end
 
-            for k in 1:min(4, length(atoms))
-                m = offset + k - 1
+            idx_a, idx_b, idx_c, idx_d = _frame_atom_indices(tok, mol_types_v[t], atoms)
+            bb4 = (idx_a, idx_b, idx_c, idx_d)
+            for k in 1:4
+                m = offset + bb4[k] - 1
                 if m <= M
                     token_to_bb4_atoms[4 * (t - 1) + k, m, b] = 1f0
                 end
             end
 
-            idx_n = findfirst(==("N"), atoms)
-            idx_ca = findfirst(==("CA"), atoms)
-            idx_c = findfirst(==("C"), atoms)
-
-            if idx_n === nothing
-                idx_n = 1
-            end
-            if idx_ca === nothing
-                idx_ca = min(2, length(atoms))
-            end
-            if idx_c === nothing
-                idx_c = min(3, length(atoms))
-            end
-
-            frames_idx[t, 1, b] = offset + idx_n - 2
-            frames_idx[t, 2, b] = offset + idx_ca - 2
+            frames_idx[t, 1, b] = offset + idx_a - 2
+            frames_idx[t, 2, b] = offset + idx_b - 2
             frames_idx[t, 3, b] = offset + idx_c - 2
         end
 
