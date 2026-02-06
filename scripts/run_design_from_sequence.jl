@@ -4,6 +4,7 @@ const WORKSPACE_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 Pkg.activate(joinpath(WORKSPACE_ROOT, "Onion.jl"))
 
 using Onion
+using SafeTensors
 
 include(normpath(joinpath(@__DIR__, "..", "src", "BoltzGen.jl")))
 using .BoltzGen
@@ -112,6 +113,20 @@ function parse_bonds(spec::AbstractString)
     return out
 end
 
+function require_sampling_checkpoint!(weights_path::AbstractString)
+    state = SafeTensors.load_safetensors(weights_path)
+    has_token_transformer = any(
+        startswith(k, "structure_module.score_model.token_transformer_layers.0.layers.")
+        for k in keys(state)
+    )
+    if !has_token_transformer
+        error(
+            "Checkpoint lacks structure diffusion token-transformer weights and cannot be used for sampling: $weights_path. " *
+            "Use a full structure checkpoint (e.g. boltzgen1_diverse) or a merged base+head checkpoint.",
+        )
+    end
+end
+
 function main()
     args = parse_kv_args(ARGS)
     with_confidence = get(args, "with-confidence", "false") == "true"
@@ -145,6 +160,7 @@ function main()
     out_pdb37 = get(args, "out-pdb-atom37", default_base * "_atom37.pdb")
     out_cif = get(args, "out-cif", default_base * ".cif")
     weights_path = get(args, "weights", joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"))
+    require_sampling_checkpoint!(weights_path)
 
     mol_type_id = BoltzGen.chain_type_ids[chain_type]
     mol_types = fill(mol_type_id, T)

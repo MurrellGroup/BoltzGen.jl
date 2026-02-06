@@ -4,6 +4,7 @@ const WORKSPACE_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 Pkg.activate(joinpath(WORKSPACE_ROOT, "Onion.jl"))
 
 using Onion
+using SafeTensors
 
 include(normpath(joinpath(@__DIR__, "..", "src", "BoltzGen.jl")))
 using .BoltzGen
@@ -85,6 +86,20 @@ function design_tokens(args::Dict{String,String})
     return String[], chain_type
 end
 
+function require_sampling_checkpoint!(weights_path::AbstractString)
+    state = SafeTensors.load_safetensors(weights_path)
+    has_token_transformer = any(
+        startswith(k, "structure_module.score_model.token_transformer_layers.0.layers.")
+        for k in keys(state)
+    )
+    if !has_token_transformer
+        error(
+            "Checkpoint lacks structure diffusion token-transformer weights and cannot be used for sampling: $weights_path. " *
+            "Use a full structure checkpoint (e.g. boltzgen1_diverse) or a merged base+head checkpoint.",
+        )
+    end
+end
+
 function main()
     args = parse_kv_args(ARGS)
     with_confidence = get(args, "with-confidence", "false") == "true"
@@ -137,6 +152,7 @@ function main()
 
     structure_group = vcat(fill(1, T_target), fill(0, T_total - T_target))
     weights_path = get(args, "weights", joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"))
+    require_sampling_checkpoint!(weights_path)
     steps = parse(Int, get(args, "steps", "100"))
     recycles = parse(Int, get(args, "recycles", "3"))
     msa_file = get(args, "msa-file", "")
