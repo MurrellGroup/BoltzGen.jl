@@ -33,6 +33,8 @@ export boltz_masker
 export build_denovo_atom14_features
 export build_denovo_atom14_features_from_sequence
 export build_design_features
+export build_design_features_from_structure
+export load_structure_tokens
 export tokens_from_sequence
 export infer_config
 export load_params!

@@ -212,6 +212,9 @@ function build_design_features(
     batch::Int=1,
     pad_atom_multiple::Int=32,
     force_atom14_for_designed_protein::Bool=true,
+    token_atom_names_override::Union{Nothing,Vector{Vector{String}}}=nothing,
+    token_atom_coords_override::Union{Nothing,Vector{Dict{String,NTuple{3,Float32}}}}=nothing,
+    center_coords_override::Union{Nothing,Vector{NTuple{3,Float32}}}=nothing,
 )
     T = length(residue_tokens)
     T > 0 || error("residue_tokens cannot be empty")
@@ -244,6 +247,9 @@ function build_design_features(
     length(structure_group_v) == T || error("structure_group length mismatch")
     length(target_msa_mask_v) == T || error("target_msa_mask length mismatch")
     length(affinity_token_mask_v) == T || error("affinity_token_mask length mismatch")
+    token_atom_names_override === nothing || length(token_atom_names_override) == T || error("token_atom_names_override length mismatch")
+    token_atom_coords_override === nothing || length(token_atom_coords_override) == T || error("token_atom_coords_override length mismatch")
+    center_coords_override === nothing || length(center_coords_override) == T || error("center_coords_override length mismatch")
 
     if chain_design_mask === nothing
         chain_design_mask_v = _propagate_chain_design_mask(design_mask_v, asym_ids_v, bonds)
@@ -257,7 +263,14 @@ function build_design_features(
     atom_counter = 0
     for t in 1:T
         tok = tokens_norm[t]
-        atoms = copy(get(ref_atoms, tok, ref_atoms["UNK"]))
+        use_override_atoms = token_atom_names_override !== nothing &&
+            !isempty(token_atom_names_override[t]) &&
+            !(force_atom14_for_designed_protein && design_mask_v[t] && mol_types_v[t] == chain_type_ids["PROTEIN"])
+        atoms = if use_override_atoms
+            copy(token_atom_names_override[t])
+        else
+            copy(get(ref_atoms, tok, ref_atoms["UNK"]))
+        end
 
         if force_atom14_for_designed_protein && design_mask_v[t] && mol_types_v[t] == chain_type_ids["PROTEIN"]
             while length(atoms) < 14
@@ -374,6 +387,7 @@ function build_design_features(
 
             atoms = token_atom_names[t]
             offset = token_atom_offsets[t]
+            atom_coord_override = token_atom_coords_override === nothing ? nothing : token_atom_coords_override[t]
 
             for (j, atom_name) in enumerate(atoms)
                 m = offset + j - 1
@@ -386,7 +400,15 @@ function build_design_features(
                 atom_to_token[m, t, b] = 1f0
                 ref_space_uid[m, b] = t - 1
                 ref_atom_name_chars[:, :, m, b] .= encode_atom_name_chars(atom_name)
-                if haskey(ref_atom_pos, tok)
+                if atom_coord_override !== nothing && haskey(atom_coord_override, atom_name)
+                    xyz = atom_coord_override[atom_name]
+                    ref_pos[1, m, b] = xyz[1]
+                    ref_pos[2, m, b] = xyz[2]
+                    ref_pos[3, m, b] = xyz[3]
+                    coords[1, m, b] = xyz[1]
+                    coords[2, m, b] = xyz[2]
+                    coords[3, m, b] = xyz[3]
+                elseif haskey(ref_atom_pos, tok)
                     tok_ref_pos = ref_atom_pos[tok]
                     if haskey(tok_ref_pos, atom_name)
                         xyz = tok_ref_pos[atom_name]
@@ -435,6 +457,17 @@ function build_design_features(
                 if m <= M
                     token_to_bb4_atoms[4 * (t - 1) + k, m, b] = 1f0
                 end
+            end
+
+            if center_coords_override !== nothing
+                ctr = center_coords_override[t]
+                center_coords[1, t, b] = ctr[1]
+                center_coords[2, t, b] = ctr[2]
+                center_coords[3, t, b] = ctr[3]
+            elseif atom_coord_override !== nothing && rep_m <= M
+                center_coords[1, t, b] = ref_pos[1, rep_m, b]
+                center_coords[2, t, b] = ref_pos[2, rep_m, b]
+                center_coords[3, t, b] = ref_pos[3, rep_m, b]
             end
 
             frames_idx[t, 1, b] = offset + idx_a - 2
@@ -541,4 +574,338 @@ end
 function build_denovo_atom14_features_from_sequence(sequence::AbstractString; chain_type::String="PROTEIN", batch::Int=1)
     residues = tokens_from_sequence(sequence; chain_type=chain_type)
     return build_design_features(residues; batch=batch)
+end
+
+function _token_and_mol_type_from_comp_id(comp_id::AbstractString, is_het::Bool; include_nonpolymer::Bool=false)
+    c = uppercase(strip(String(comp_id)))
+    if c in canonical_tokens || c == "UNK"
+        return c == "UNK" ? "UNK" : c, chain_type_ids["PROTEIN"]
+    elseif c in ("DA", "DG", "DC", "DT", "DN")
+        return c, chain_type_ids["DNA"]
+    elseif c in ("A", "G", "C", "U", "N")
+        return c, chain_type_ids["RNA"]
+    elseif !is_het
+        return "UNK", chain_type_ids["PROTEIN"]
+    elseif include_nonpolymer
+        return "UNK", chain_type_ids["NONPOLYMER"]
+    else
+        return nothing, -1
+    end
+end
+
+function _safeparse_int(x::AbstractString, default::Int=0)
+    s = strip(String(x))
+    isempty(s) && return default
+    if s in (".", "?")
+        return default
+    end
+    try
+        return parse(Int, s)
+    catch
+        return default
+    end
+end
+
+function _safeparse_f32(x::AbstractString, default::Float32=NaN32)
+    s = strip(String(x))
+    isempty(s) && return default
+    if s in (".", "?")
+        return default
+    end
+    try
+        return Float32(parse(Float64, s))
+    catch
+        return default
+    end
+end
+
+function _normalize_chain_id(x::AbstractString)
+    s = strip(String(x))
+    return isempty(s) ? "_" : s
+end
+
+function _split_cif_fields(line::AbstractString)
+    out = String[]
+    i = firstindex(line)
+    n = lastindex(line)
+    while i <= n
+        while i <= n && isspace(line[i])
+            i = nextind(line, i)
+        end
+        i > n && break
+        ch = line[i]
+        if ch == '\'' || ch == '"'
+            q = ch
+            j = nextind(line, i)
+            while j <= n && line[j] != q
+                j = nextind(line, j)
+            end
+            if j <= n
+                push!(out, String(line[nextind(line, i):prevind(line, j)]))
+                i = nextind(line, j)
+            else
+                push!(out, String(line[nextind(line, i):end]))
+                break
+            end
+        else
+            j = i
+            while j <= n && !isspace(line[j])
+                j = nextind(line, j)
+            end
+            push!(out, String(line[i:prevind(line, j)]))
+            i = j
+        end
+    end
+    return out
+end
+
+function _parse_structure_records(path::AbstractString)
+    p = lowercase(path)
+    if endswith(p, ".pdb")
+        keys = Tuple{String, Int, String, String}[]
+        rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
+        rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
+        rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+
+        for line in eachline(path)
+            length(line) < 54 && continue
+            rec = line[1:6]
+            if !(rec == "ATOM  " || rec == "HETATM")
+                continue
+            end
+            alt = line[17]
+            if !(alt == ' ' || alt == 'A' || alt == '1')
+                continue
+            end
+            atom_name = uppercase(strip(line[13:16]))
+            isempty(atom_name) && continue
+            comp_id = uppercase(strip(line[18:20]))
+            chain = _normalize_chain_id(line[22:22])
+            res_seq = _safeparse_int(line[23:26], 0)
+            ins = strip(line[27:27])
+            x = _safeparse_f32(line[31:38], NaN32)
+            y = _safeparse_f32(line[39:46], NaN32)
+            z = _safeparse_f32(line[47:54], NaN32)
+            isfinite(x) && isfinite(y) && isfinite(z) || continue
+
+            key = (chain, res_seq, ins, comp_id)
+            if !haskey(rec_atoms, key)
+                rec_atoms[key] = String[]
+                rec_coords[key] = Dict{String, NTuple{3, Float32}}()
+                rec_het[key] = rec == "HETATM"
+                push!(keys, key)
+            end
+            if !haskey(rec_coords[key], atom_name)
+                push!(rec_atoms[key], atom_name)
+                rec_coords[key][atom_name] = (x, y, z)
+            end
+        end
+        return keys, rec_atoms, rec_coords, rec_het
+    elseif endswith(p, ".cif") || endswith(p, ".mmcif")
+        keys = Tuple{String, Int, String, String}[]
+        rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
+        rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
+        rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+
+        lines = readlines(path)
+        n = length(lines)
+        i = 1
+        done_atom_loop = false
+        while i <= n && !done_atom_loop
+            line = strip(lines[i])
+            if line == "loop_"
+                cols = String[]
+                j = i + 1
+                while j <= n && startswith(strip(lines[j]), "_")
+                    push!(cols, strip(lines[j]))
+                    j += 1
+                end
+                if any(startswith(c, "_atom_site.") for c in cols)
+                    col_idx = Dict{String, Int}()
+                    for (k, c) in enumerate(cols)
+                        col_idx[c] = k
+                    end
+                    function _col(fields, names::Vector{String}, default::String="")
+                        for name in names
+                            if haskey(col_idx, name)
+                                idx = col_idx[name]
+                                if idx <= length(fields)
+                                    return fields[idx]
+                                end
+                            end
+                        end
+                        return default
+                    end
+                    row = j
+                    while row <= n
+                        s = strip(lines[row])
+                        if isempty(s) || s == "#" || s == "loop_" || startswith(s, "data_")
+                            break
+                        end
+                        startswith(s, "_") && break
+                        fields = _split_cif_fields(lines[row])
+                        if length(fields) < length(cols)
+                            row += 1
+                            continue
+                        end
+                        group = uppercase(strip(_col(fields, ["_atom_site.group_PDB"])))
+                        if !(group == "ATOM" || group == "HETATM")
+                            row += 1
+                            continue
+                        end
+                        model_num = _safeparse_int(_col(fields, ["_atom_site.pdbx_PDB_model_num"]), 1)
+                        model_num == 1 || (row += 1; continue)
+                        alt = strip(_col(fields, ["_atom_site.label_alt_id"], "."))
+                        if !(alt == "." || alt == "?" || alt == "A" || alt == "1")
+                            row += 1
+                            continue
+                        end
+                        atom_name = uppercase(strip(_col(fields, ["_atom_site.label_atom_id", "_atom_site.auth_atom_id"])))
+                        comp_id = uppercase(strip(_col(fields, ["_atom_site.label_comp_id", "_atom_site.auth_comp_id"])))
+                        chain = _normalize_chain_id(_col(fields, ["_atom_site.label_asym_id", "_atom_site.auth_asym_id"], "_"))
+                        seq_raw = _col(fields, ["_atom_site.label_seq_id", "_atom_site.auth_seq_id"], "0")
+                        res_seq = _safeparse_int(seq_raw, 0)
+                        ins = strip(_col(fields, ["_atom_site.pdbx_PDB_ins_code"], ""))
+                        x = _safeparse_f32(_col(fields, ["_atom_site.Cartn_x"]), NaN32)
+                        y = _safeparse_f32(_col(fields, ["_atom_site.Cartn_y"]), NaN32)
+                        z = _safeparse_f32(_col(fields, ["_atom_site.Cartn_z"]), NaN32)
+                        if isempty(atom_name) || isempty(comp_id) || !isfinite(x) || !isfinite(y) || !isfinite(z)
+                            row += 1
+                            continue
+                        end
+
+                        key = (chain, res_seq, ins, comp_id)
+                        if !haskey(rec_atoms, key)
+                            rec_atoms[key] = String[]
+                            rec_coords[key] = Dict{String, NTuple{3, Float32}}()
+                            rec_het[key] = group == "HETATM"
+                            push!(keys, key)
+                        end
+                        if !haskey(rec_coords[key], atom_name)
+                            push!(rec_atoms[key], atom_name)
+                            rec_coords[key][atom_name] = (x, y, z)
+                        end
+                        row += 1
+                    end
+                    done_atom_loop = true
+                    i = row
+                    continue
+                end
+            end
+            i += 1
+        end
+        return keys, rec_atoms, rec_coords, rec_het
+    else
+        error("Unsupported structure format (expected .pdb/.cif/.mmcif): $path")
+    end
+end
+
+function load_structure_tokens(
+    path::AbstractString;
+    include_chains::Union{Nothing, Vector{String}}=nothing,
+    include_nonpolymer::Bool=false,
+)
+    keys, rec_atoms, rec_coords, rec_het = _parse_structure_records(path)
+
+    keep_chain = nothing
+    if include_chains !== nothing
+        keep_chain = Set(_normalize_chain_id(c) for c in include_chains)
+    end
+
+    residue_tokens = String[]
+    mol_types = Int[]
+    chain_labels = String[]
+    residue_indices = Int[]
+    token_atom_names = Vector{Vector{String}}()
+    token_atom_coords = Vector{Dict{String, NTuple{3, Float32}}}()
+
+    for key in keys
+        chain, res_seq, _, comp_id = key
+        if keep_chain !== nothing && !(chain in keep_chain)
+            continue
+        end
+        tok, mt = _token_and_mol_type_from_comp_id(comp_id, rec_het[key]; include_nonpolymer=include_nonpolymer)
+        tok === nothing && continue
+
+        push!(residue_tokens, tok)
+        push!(mol_types, mt)
+        push!(chain_labels, chain)
+        push!(residue_indices, res_seq)
+        push!(token_atom_names, copy(rec_atoms[key]))
+        push!(token_atom_coords, copy(rec_coords[key]))
+    end
+
+    isempty(residue_tokens) && error("No polymer residues parsed from structure: $path")
+
+    chain_to_asym = Dict{String, Int}()
+    next_asym = 0
+    asym_ids = Int[]
+    for c in chain_labels
+        if !haskey(chain_to_asym, c)
+            chain_to_asym[c] = next_asym
+            next_asym += 1
+        end
+        push!(asym_ids, chain_to_asym[c])
+    end
+    entity_ids = copy(asym_ids)
+    sym_ids = zeros(Int, length(asym_ids))
+
+    return (
+        residue_tokens=residue_tokens,
+        mol_types=mol_types,
+        asym_ids=asym_ids,
+        entity_ids=entity_ids,
+        sym_ids=sym_ids,
+        residue_indices=residue_indices,
+        token_atom_names=token_atom_names,
+        token_atom_coords=token_atom_coords,
+        chain_labels=chain_labels,
+    )
+end
+
+function build_design_features_from_structure(
+    path::AbstractString;
+    include_chains::Union{Nothing, Vector{String}}=nothing,
+    include_nonpolymer::Bool=false,
+    design_mask::Union{Nothing, AbstractVector{Bool}}=nothing,
+    chain_design_mask::Union{Nothing, AbstractVector{Bool}}=nothing,
+    binding_type::Union{Nothing, Vector{Int}}=nothing,
+    ss_type::Union{Nothing, Vector{Int}}=nothing,
+    structure_group::Union{Nothing, Vector{Int}}=nothing,
+    target_msa_mask::Union{Nothing, AbstractVector{Bool}}=nothing,
+    affinity_token_mask::Union{Nothing, AbstractVector{Bool}}=nothing,
+    affinity_mw::Float32=0f0,
+    bonds::Vector{NTuple{3, Int}}=NTuple{3, Int}[],
+    contact_pairs::Vector{NTuple{3, Any}}=NTuple{3, Any}[],
+    batch::Int=1,
+    pad_atom_multiple::Int=32,
+    force_atom14_for_designed_protein::Bool=true,
+)
+    parsed = load_structure_tokens(path; include_chains=include_chains, include_nonpolymer=include_nonpolymer)
+    T = length(parsed.residue_tokens)
+    design_v = design_mask === nothing ? falses(T) : collect(design_mask)
+    groups_v = structure_group === nothing ? ones(Int, T) : structure_group
+    return build_design_features(
+        parsed.residue_tokens;
+        mol_types=parsed.mol_types,
+        asym_ids=parsed.asym_ids,
+        entity_ids=parsed.entity_ids,
+        sym_ids=parsed.sym_ids,
+        residue_indices=parsed.residue_indices,
+        design_mask=design_v,
+        chain_design_mask=chain_design_mask,
+        binding_type=binding_type,
+        ss_type=ss_type,
+        structure_group=groups_v,
+        target_msa_mask=target_msa_mask,
+        affinity_token_mask=affinity_token_mask,
+        affinity_mw=affinity_mw,
+        bonds=bonds,
+        contact_pairs=contact_pairs,
+        batch=batch,
+        pad_atom_multiple=pad_atom_multiple,
+        force_atom14_for_designed_protein=force_atom14_for_designed_protein,
+        token_atom_names_override=parsed.token_atom_names,
+        token_atom_coords_override=parsed.token_atom_coords,
+    )
 end
