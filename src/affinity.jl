@@ -91,8 +91,12 @@ function (am::AffinityModule)(
     token_to_rep_atom_ff = repeat_interleave_batch(feats["token_to_rep_atom"], multiplicity)
 
     x_pred_ff = x_pred
-    if ndims(x_pred_ff) == 4
-        x_pred_ff = reshape(x_pred_ff, size(x_pred_ff, 1), size(x_pred_ff, 2), size(x_pred_ff, 3) * size(x_pred_ff, 4))
+    if ndims(x_pred_ff) >= 4
+        tail = prod(size(x_pred_ff)[3:end])
+        x_pred_ff = reshape(x_pred_ff, size(x_pred_ff, 1), size(x_pred_ff, 2), tail)
+    end
+    if ndims(x_pred_ff) != 3
+        error("AffinityModule expected x_pred with 3 dims after flattening, got size=$(size(x_pred_ff))")
     end
 
     x_pred_batched = permutedims(x_pred_ff, (2, 1, 3))

@@ -8,6 +8,18 @@ function has_option(args::Vector{String}, name::AbstractString)
     return any(a -> a == needle, args)
 end
 
+function option_value(args::Vector{String}, name::AbstractString, default::String)
+    needle = "--" * String(name)
+    i = findfirst(==(needle), args)
+    if i === nothing
+        return default
+    end
+    if i < length(args) && !startswith(args[i + 1], "--")
+        return args[i + 1]
+    end
+    return "true"
+end
+
 forwarded = copy(ARGS)
 
 has_option(forwarded, "sequence") || error(
@@ -20,9 +32,14 @@ if !has_option(forwarded, "design-mask")
     push!(forwarded, "")
 end
 
+with_affinity = lowercase(option_value(forwarded, "with-affinity", "false")) == "true"
+
 if !has_option(forwarded, "weights")
     push!(forwarded, "--weights")
-    push!(forwarded, joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors"))
+    default_weights = with_affinity ?
+        joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors") :
+        joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors")
+    push!(forwarded, default_weights)
 end
 
 if !has_option(forwarded, "with-confidence")
