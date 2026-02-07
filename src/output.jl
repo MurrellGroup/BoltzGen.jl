@@ -398,6 +398,8 @@ function geometry_stats_atom37(feats::Dict, coords; batch::Int=1)
             n_atoms=0,
             max_abs=0f0,
             min_nearest_neighbor=Inf32,
+            max_nearest_neighbor=Inf32,
+            frac_nearest_lt_0p5=0f0,
             frac_abs_ge900=0f0,
         )
     end
@@ -421,6 +423,7 @@ function geometry_stats_atom37(feats::Dict, coords; batch::Int=1)
     end
 
     min_d2 = Inf32
+    nn_d2 = fill(Inf32, n)
     if n >= 2
         for i in 1:(n - 1)
             xi = xyz[1, i]
@@ -434,14 +437,26 @@ function geometry_stats_atom37(feats::Dict, coords; batch::Int=1)
                 if d2 < min_d2
                     min_d2 = d2
                 end
+                if d2 < nn_d2[i]
+                    nn_d2[i] = d2
+                end
+                if d2 < nn_d2[j]
+                    nn_d2[j] = d2
+                end
             end
         end
     end
+
+    nn = sqrt.(nn_d2)
+    max_nn = isfinite(minimum(nn)) ? maximum(nn) : Inf32
+    frac_nn_lt_0p5 = Float32(count(x -> isfinite(x) && x < 0.5f0, nn)) / Float32(n)
 
     return (
         n_atoms=n,
         max_abs=max_abs,
         min_nearest_neighbor=sqrt(min_d2),
+        max_nearest_neighbor=max_nn,
+        frac_nearest_lt_0p5=frac_nn_lt_0p5,
         frac_abs_ge900=Float32(far) / Float32(n),
     )
 end
@@ -452,7 +467,9 @@ function assert_geometry_sane_atom37!(
     batch::Int=1,
     max_abs::Float32=200f0,
     max_far_coord_fraction::Float32=0.05f0,
-    max_min_nearest_neighbor::Float32=4.0f0,
+    min_min_nearest_neighbor::Float32=0.01f0,
+    max_max_nearest_neighbor::Float32=8.0f0,
+    max_frac_nearest_lt_0p5::Union{Nothing,Float32}=nothing,
 )
     stats = geometry_stats_atom37(feats, coords; batch=batch)
     failures = String[]
@@ -465,15 +482,21 @@ function assert_geometry_sane_atom37!(
     if stats.frac_abs_ge900 > max_far_coord_fraction
         push!(failures, "frac_abs_ge900=$(stats.frac_abs_ge900) > $max_far_coord_fraction")
     end
-    if isfinite(stats.min_nearest_neighbor) && stats.min_nearest_neighbor > max_min_nearest_neighbor
-        push!(failures, "min_nearest_neighbor=$(stats.min_nearest_neighbor) > $max_min_nearest_neighbor")
+    if isfinite(stats.min_nearest_neighbor) && stats.min_nearest_neighbor < min_min_nearest_neighbor
+        push!(failures, "min_nearest_neighbor=$(stats.min_nearest_neighbor) < $min_min_nearest_neighbor")
+    end
+    if isfinite(stats.max_nearest_neighbor) && stats.max_nearest_neighbor > max_max_nearest_neighbor
+        push!(failures, "max_nearest_neighbor=$(stats.max_nearest_neighbor) > $max_max_nearest_neighbor")
+    end
+    if max_frac_nearest_lt_0p5 !== nothing && stats.frac_nearest_lt_0p5 > max_frac_nearest_lt_0p5
+        push!(failures, "frac_nearest_lt_0p5=$(stats.frac_nearest_lt_0p5) > $max_frac_nearest_lt_0p5")
     end
 
     if !isempty(failures)
         error(
             "Atom37 geometry sanity check failed: " *
             join(failures, "; ") *
-            ". stats=(n_atoms=$(stats.n_atoms), max_abs=$(stats.max_abs), min_nn=$(stats.min_nearest_neighbor), frac_abs_ge900=$(stats.frac_abs_ge900))",
+            ". stats=(n_atoms=$(stats.n_atoms), max_abs=$(stats.max_abs), min_nn=$(stats.min_nearest_neighbor), max_nn=$(stats.max_nearest_neighbor), frac_nn_lt_0p5=$(stats.frac_nearest_lt_0p5), frac_abs_ge900=$(stats.frac_abs_ge900))",
         )
     end
 

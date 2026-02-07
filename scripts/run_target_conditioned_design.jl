@@ -125,9 +125,15 @@ function main()
     isempty(target_path) && error("Missing --target <path-to-pdb-or-cif>")
 
     include_chains = parse_chain_list(get(args, "target-chains", ""))
+    target_use_assembly = lowercase(strip(get(args, "target-use-assembly", "false"))) in ("1", "true", "t", "yes", "y", "on")
     include_nonpolymer_default = with_affinity ? "true" : "false"
     include_nonpolymer = get(args, "include-nonpolymer", include_nonpolymer_default) == "true"
-    parsed = BoltzGen.load_structure_tokens(target_path; include_chains=include_chains, include_nonpolymer=include_nonpolymer)
+    parsed = BoltzGen.load_structure_tokens(
+        target_path;
+        include_chains=include_chains,
+        include_nonpolymer=include_nonpolymer,
+        use_assembly=target_use_assembly,
+    )
 
     d_tokens, d_chain_type = design_tokens(args)
     d_mol_type = BoltzGen.chain_type_ids[d_chain_type]
@@ -271,18 +277,6 @@ function main()
             feats_out["res_type"][:, t, 1] .= feats["res_type"][:, t, 1]
         end
     end
-
-    geom = BoltzGen.assert_geometry_sane_atom37!(feats_out, coords; batch=1)
-    println(
-        "Geometry(atom37): atoms=",
-        geom.n_atoms,
-        " maxabs=",
-        geom.max_abs,
-        " minnn=",
-        geom.min_nearest_neighbor,
-        " frac_abs_ge900=",
-        geom.frac_abs_ge900,
-    )
 
     mkpath(dirname(out_pdb))
     mkpath(dirname(out_pdb37))

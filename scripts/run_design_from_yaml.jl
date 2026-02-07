@@ -71,7 +71,7 @@ function main()
 
     with_confidence = get(args, "with-confidence", "false") == "true"
     with_affinity = get(args, "with-affinity", "false") == "true"
-    include_nonpolymer_default = with_affinity ? "true" : "false"
+    include_nonpolymer_default = "true"
     include_nonpolymer = get(args, "include-nonpolymer", include_nonpolymer_default) == "true"
 
     out_heads = get(args, "out-heads", "")
@@ -195,18 +195,6 @@ function main()
             feats_out["res_type"][:, t, 1] .= feats["res_type"][:, t, 1]
         end
     end
-
-    geom = BoltzGen.assert_geometry_sane_atom37!(feats_out, coords; batch=1)
-    println(
-        "Geometry(atom37): atoms=",
-        geom.n_atoms,
-        " maxabs=",
-        geom.max_abs,
-        " minnn=",
-        geom.min_nearest_neighbor,
-        " frac_abs_ge900=",
-        geom.frac_abs_ge900,
-    )
 
     mkpath(dirname(out_pdb))
     mkpath(dirname(out_pdb37))

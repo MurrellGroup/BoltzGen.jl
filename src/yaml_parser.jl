@@ -827,17 +827,16 @@ end
 function _resolve_constraint_chain(name::String, chain_aliases::Dict{String, Vector{String}})
     if haskey(chain_aliases, name)
         vals = chain_aliases[name]
-        if length(vals) == 1
-            return vals[1]
-        end
-        error("Constraint chain '$name' is ambiguous after renaming: $(join(vals, ", "))")
+        # Python schema parser keeps a single renaming map and effectively resolves
+        # to the most recent alias when IDs collide multiple times.
+        return vals[end]
     end
     return name
 end
 
 function parse_design_yaml(
     yaml_path::AbstractString;
-    include_nonpolymer::Bool=false,
+    include_nonpolymer::Bool=true,
     rng::AbstractRNG=Random.default_rng(),
     max_total_len_trials::Int=128,
 )

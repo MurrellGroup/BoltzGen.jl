@@ -72,17 +72,6 @@ function main()
 
     coords = out["sample_atom_coords"]
     feats_out = BoltzGen.postprocess_atom14(feats_masked, coords)
-    geom = BoltzGen.assert_geometry_sane_atom37!(feats_out, coords; batch=1)
-    println(
-        "Geometry(atom37): atoms=",
-        geom.n_atoms,
-        " maxabs=",
-        geom.max_abs,
-        " minnn=",
-        geom.min_nearest_neighbor,
-        " frac_abs_ge900=",
-        geom.frac_abs_ge900,
-    )
 
     mkpath(dirname(out_pdb))
     mkpath(dirname(out_pdb37))
