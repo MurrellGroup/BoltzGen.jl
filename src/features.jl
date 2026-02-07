@@ -9,12 +9,66 @@ function _onehot_set!(arr, idx::Int, t::Int, b::Int)
 end
 
 function _atomic_num_from_atom_name(atom_name::AbstractString)
-    u = uppercase(strip(String(atom_name)))
+    raw = strip(String(atom_name))
+    u = uppercase(raw)
     if startswith(u, "FL")
         return mask_element_id
     elseif startswith(u, "LV")
         return 116
-    elseif startswith(u, "CL")
+    end
+
+    # Prefer chemistry-style symbols when present in atom names, especially
+    # for SMILES-derived ligands (e.g. "Cl1", "Br2", "Se3").
+    letters = filter(isletter, raw)
+    if !isempty(letters)
+        if length(letters) >= 2 && islowercase(letters[2])
+            sym2 = string(uppercase(letters[1]), lowercase(letters[2]))
+            if sym2 == "Cl"
+                return 17
+            elseif sym2 == "Br"
+                return 35
+            elseif sym2 == "Si"
+                return 14
+            elseif sym2 == "Se"
+                return 34
+            elseif sym2 == "Na"
+                return 11
+            elseif sym2 == "Mg"
+                return 12
+            elseif sym2 == "Zn"
+                return 30
+            elseif sym2 == "Fe"
+                return 26
+            elseif sym2 == "Ca"
+                return 20
+            elseif sym2 == "Cu"
+                return 29
+            elseif sym2 == "Mn"
+                return 25
+            elseif sym2 == "Co"
+                return 27
+            elseif sym2 == "Ni"
+                return 28
+            elseif sym2 == "Li"
+                return 3
+            elseif sym2 == "Al"
+                return 13
+            elseif sym2 == "Sn"
+                return 50
+            elseif sym2 == "Ag"
+                return 47
+            elseif sym2 == "Pt"
+                return 78
+            elseif sym2 == "Hg"
+                return 80
+            elseif sym2 == "Pb"
+                return 82
+            end
+        end
+    end
+
+    # Uppercase fallback for sources that drop mixed-case element symbols.
+    if startswith(u, "CL")
         return 17
     elseif startswith(u, "BR")
         return 35
@@ -26,13 +80,20 @@ function _atomic_num_from_atom_name(atom_name::AbstractString)
         return 26
     elseif startswith(u, "NA")
         return 11
+    elseif startswith(u, "CU")
+        return 29
+    elseif startswith(u, "MN")
+        return 25
+    elseif startswith(u, "CO")
+        return 27
+    elseif startswith(u, "NI")
+        return 28
     elseif startswith(u, "CA") && !(u == "CA")
         # e.g. atom name "CA" in proteins means alpha carbon, not calcium.
         return 6
     end
 
-    stripped = replace(u, r"[0-9]" => "")
-    stripped = strip(stripped)
+    stripped = replace(u, r"[^A-Z]" => "")
     if isempty(stripped)
         return 6
     elseif startswith(stripped, "C")
@@ -47,6 +108,12 @@ function _atomic_num_from_atom_name(atom_name::AbstractString)
         return 15
     elseif startswith(stripped, "H")
         return 1
+    elseif startswith(stripped, "F")
+        return 9
+    elseif startswith(stripped, "I")
+        return 53
+    elseif startswith(stripped, "B")
+        return 5
     end
     return 6
 end
@@ -415,6 +482,12 @@ function build_design_features(
     atom_counter = 0
     for t in 1:T
         tok = tokens_norm[t]
+        is_nonpoly = mol_types_v[t] == chain_type_ids["NONPOLYMER"]
+        if is_nonpoly
+            token_atom_names_override === nothing && error("NONPOLYMER token at index $t requires token_atom_names_override")
+            token_atom_coords_override === nothing && error("NONPOLYMER token at index $t requires token_atom_coords_override")
+            isempty(token_atom_names_override[t]) && error("NONPOLYMER token at index $t has empty atom-name override")
+        end
         use_override_atoms = token_atom_names_override !== nothing &&
             !isempty(token_atom_names_override[t]) &&
             !(force_atom14_for_designed_protein && design_mask_v[t] && mol_types_v[t] == chain_type_ids["PROTEIN"])
@@ -433,6 +506,20 @@ function build_design_features(
         token_atom_offsets[t] = atom_counter + 1
         atom_counter += length(atoms)
         token_atom_names[t] = atoms
+    end
+
+    # Match python featurizer semantics: atoms belonging to the same
+    # (chain/asym, residue_index) share a residue-space uid.
+    token_space_uid = zeros(Int, T)
+    chain_res_to_space_uid = Dict{Tuple{Int,Int},Int}()
+    next_space_uid = 0
+    for t in 1:T
+        key = (asym_ids_v[t], residue_indices_v[t])
+        if !haskey(chain_res_to_space_uid, key)
+            chain_res_to_space_uid[key] = next_space_uid
+            next_space_uid += 1
+        end
+        token_space_uid[t] = chain_res_to_space_uid[key]
     end
 
     M_real = atom_counter
@@ -609,6 +696,7 @@ function build_design_features(
             atoms = token_atom_names[t]
             offset = token_atom_offsets[t]
             atom_coord_override = token_atom_coords_override === nothing ? nothing : token_atom_coords_override[t]
+            is_nonpoly = mol_types_v[t] == chain_type_ids["NONPOLYMER"]
 
             for (j, atom_name) in enumerate(atoms)
                 m = offset + j - 1
@@ -619,7 +707,7 @@ function build_design_features(
                 atom_pad_mask[m, b] = 1f0
                 atom_resolved_mask[m, b] = 1f0
                 atom_to_token[m, t, b] = 1f0
-                ref_space_uid[m, b] = t - 1
+                ref_space_uid[m, b] = token_space_uid[t]
                 ref_atom_name_chars[:, :, m, b] .= encode_atom_name_chars(atom_name)
                 if atom_coord_override !== nothing && haskey(atom_coord_override, atom_name)
                     xyz = atom_coord_override[atom_name]
@@ -629,6 +717,8 @@ function build_design_features(
                     coords[1, m, b] = xyz[1]
                     coords[2, m, b] = xyz[2]
                     coords[3, m, b] = xyz[3]
+                elseif is_nonpoly
+                    error("Missing coordinate override for NONPOLYMER atom '$atom_name' at token index $t")
                 elseif haskey(ref_atom_pos, tok)
                     tok_ref_pos = ref_atom_pos[tok]
                     if haskey(tok_ref_pos, atom_name)
@@ -694,6 +784,66 @@ function build_design_features(
             frames_idx[t, 1, b] = offset + idx_a - 2
             frames_idx[t, 2, b] = offset + idx_b - 2
             frames_idx[t, 3, b] = offset + idx_c - 2
+        end
+
+        # Match python's compute_frames_nonpolymer: for nonpolymer chains with
+        # >=3 atoms, compute per-token frames from nearest-neighbor triplets
+        # within the chain atom set.
+        chain_order = unique(asym_ids_v)
+        token_cursor = 1
+        for chain_id in chain_order
+            chain_tokens = findall(x -> x == chain_id, asym_ids_v)
+            isempty(chain_tokens) && continue
+            first(chain_tokens) == token_cursor || error("asym_id tokens must be contiguous for chain $chain_id")
+            last(chain_tokens) == token_cursor + length(chain_tokens) - 1 || error("asym_id tokens must be contiguous for chain $chain_id")
+
+            t_start = token_cursor
+            t_end = token_cursor + length(chain_tokens) - 1
+            token_cursor = t_end + 1
+
+            num_atoms_chain = sum(length(token_atom_names[t]) for t in t_start:t_end)
+            if mol_types_v[t_start] != chain_type_ids["NONPOLYMER"] || num_atoms_chain < 3
+                continue
+            end
+            num_atoms_chain == length(chain_tokens) || error(
+                "NONPOLYMER frame recompute requires one atom per token for chain $chain_id; got tokens=$(length(chain_tokens)) atoms=$num_atoms_chain",
+            )
+
+            atom_ids = Vector{Int}(undef, num_atoms_chain)
+            for t in t_start:t_end
+                atom_ids[t - t_start + 1] = token_atom_offsets[t]
+            end
+
+            dist = fill(Inf32, num_atoms_chain, num_atoms_chain)
+            for i in 1:num_atoms_chain
+                mi = atom_ids[i]
+                ri = atom_resolved_mask[mi, b] > 0.5f0
+                xi = ref_pos[1, mi, b]
+                yi = ref_pos[2, mi, b]
+                zi = ref_pos[3, mi, b]
+                for j in 1:num_atoms_chain
+                    mj = atom_ids[j]
+                    rj = atom_resolved_mask[mj, b] > 0.5f0
+                    if ri && rj
+                        dx = xi - ref_pos[1, mj, b]
+                        dy = yi - ref_pos[2, mj, b]
+                        dz = zi - ref_pos[3, mj, b]
+                        dist[i, j] = sqrt(dx * dx + dy * dy + dz * dz)
+                    end
+                end
+            end
+
+            for li in 1:num_atoms_chain
+                # Keep neighbor order deterministic under equal/near-equal distances.
+                # Python argsort behavior effectively prefers lower indices on ties.
+                ord = collect(1:num_atoms_chain)
+                sort!(ord; by=j -> (dist[li, j], j))
+                length(ord) >= 3 || error("Failed to compute nonpolymer frame neighbors for chain $chain_id")
+                t = t_start + li - 1
+                frames_idx[t, 1, b] = atom_ids[ord[2]] - 1
+                frames_idx[t, 2, b] = atom_ids[ord[1]] - 1
+                frames_idx[t, 3, b] = atom_ids[ord[3]] - 1
+            end
         end
 
         for (i, j, bt) in bonds

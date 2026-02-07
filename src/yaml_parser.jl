@@ -167,6 +167,53 @@ function _parse_polymer_sequence(raw::AbstractString, chain_type::AbstractString
     return tokens, design_mask
 end
 
+function _atomize_smiles_ligand_tokens(
+    toks::Vector{String},
+    atom_names_src::Vector{Vector{String}},
+    atom_coords_src::Vector{Dict{String,NTuple{3,Float32}}},
+    token_bonds_src::Vector{Vector{NTuple{3,Int}}},
+)
+    length(toks) == length(atom_names_src) || error("SMILES atom names length mismatch")
+    length(toks) == length(atom_coords_src) || error("SMILES atom coords length mismatch")
+    length(toks) == length(token_bonds_src) || error("SMILES atom bonds length mismatch")
+
+    atoks = String[]
+    anames = Vector{Vector{String}}()
+    acoords = Vector{Dict{String,NTuple{3,Float32}}}()
+    parent_idx = Int[]
+    residue_start = Int[]
+
+    for i in eachindex(toks)
+        push!(residue_start, length(atoks) + 1)
+        names = atom_names_src[i]
+        coords = atom_coords_src[i]
+        isempty(names) && error("SMILES ligand residue has zero atoms at index $i")
+        for nm in names
+            haskey(coords, nm) || error("Missing SMILES atom coordinate for atom '$nm' at residue index $i")
+            push!(atoks, "UNK")
+            push!(anames, [nm])
+            push!(acoords, Dict{String,NTuple{3,Float32}}(nm => coords[nm]))
+            push!(parent_idx, i)
+        end
+    end
+
+    abonds = NTuple{3,Int}[]
+    for i in eachindex(toks)
+        n = length(atom_names_src[i])
+        start_i = residue_start[i]
+        for (a, b, bt) in token_bonds_src[i]
+            1 <= a <= n || error("SMILES bond atom index out of range at residue $i: $a / $n")
+            1 <= b <= n || error("SMILES bond atom index out of range at residue $i: $b / $n")
+            a == b && continue
+            t1 = start_i + a - 1
+            t2 = start_i + b - 1
+            push!(abonds, (t1, t2, bt))
+        end
+    end
+
+    return atoks, anames, acoords, parent_idx, abonds
+end
+
 function _token_to_msa_char(tok::AbstractString, mol_type_id::Int)
     t = uppercase(strip(String(tok)))
     if t == "-"
@@ -863,6 +910,7 @@ function parse_design_yaml(
         target_msa_mask = Bool[]
         cyclic_period = Int[]
         token_msa_paths = Union{Nothing, String}[]
+        bonds = NTuple{3, Int}[]
 
             chain_aliases = Dict{String, Vector{String}}()
             used_chain_labels = Set{String}()
@@ -907,9 +955,12 @@ function parse_design_yaml(
                 ent_cyclic_period,
                 ent_msa_paths,
                 ent_sym_ids,
+                ent_bonds::Vector{NTuple{3,Int}},
                 orig_chain_names::Vector{String},
                 fuse_target::Union{Nothing,String}=nothing,
             )
+                length(ent_residue_tokens) == length(ent_mol_types) || error("append_entity!: token/molecule length mismatch")
+                length(ent_residue_tokens) == length(ent_chain_labels) || error("append_entity!: token/chain length mismatch")
                 local_chain_map = Dict{String, String}()
                 if fuse_target === nothing
                     for cname in orig_chain_names
@@ -944,6 +995,7 @@ function parse_design_yaml(
                 end
                 fused_chain_offsets = Dict{String, Int}()
                 fused_chain_meta = Dict{String, NTuple{3,Int}}()  # asym, entity, sym
+                local_to_global = zeros(Int, length(ent_residue_tokens))
 
                 for i in eachindex(ent_residue_tokens)
                     c_orig = ent_chain_labels[i]
@@ -986,6 +1038,17 @@ function parse_design_yaml(
                     push!(target_msa_mask, ent_target_msa_mask[i])
                     push!(cyclic_period, ent_cyclic_period[i])
                     push!(token_msa_paths, ent_msa_paths[i])
+                    local_to_global[i] = length(residue_tokens)
+                end
+
+                for (i, j, bt) in ent_bonds
+                    1 <= i <= length(local_to_global) || error("append_entity!: bond source index out of range: $i")
+                    1 <= j <= length(local_to_global) || error("append_entity!: bond target index out of range: $j")
+                    gi = local_to_global[i]
+                    gj = local_to_global[j]
+                    gi == gj && continue
+                    a, b = gi < gj ? (gi, gj) : (gj, gi)
+                    push!(bonds, (a, b, bt))
                 end
             end
 
@@ -1023,6 +1086,7 @@ function parse_design_yaml(
                     ent_cyclic_period = Int[]
                     ent_msa_paths = Union{Nothing, String}[]
                     ent_sym_ids = Int[]
+                    ent_bonds = NTuple{3,Int}[]
 
                     mt = chain_type_ids[chain_type]
                     for id_any in ids
@@ -1058,6 +1122,7 @@ function parse_design_yaml(
                         ent_cyclic_period,
                         ent_msa_paths,
                         ent_sym_ids,
+                        ent_bonds,
                         [string(x) for x in ids],
                         fuse_target === nothing ? nothing : string(fuse_target),
                     )
@@ -1074,24 +1139,35 @@ function parse_design_yaml(
                     toks = String[]
                     atom_names_src = Vector{Vector{String}}()
                     atom_coords_src = Vector{Dict{String,NTuple{3,Float32}}}()
+                    atomized_parent_idx = Int[]
+                    ligand_internal_bonds_local = NTuple{3,Int}[]
                     if smiles !== nothing
                         smiles_list = [String(strip(string(x))) for x in _as_list(smiles)]
                         lig = smiles_to_ligand_tokens(smiles_list)
-                        toks = lig.tokens
-                        atom_names_src = lig.token_atom_names
-                        atom_coords_src = lig.token_atom_coords
+                        toks_raw = lig.tokens
+                        btype_raw = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), length(toks_raw))
+                        sstype_raw = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), length(toks_raw))
+                        toks, atom_names_src, atom_coords_src, atomized_parent_idx, ligand_internal_bonds_local =
+                            _atomize_smiles_ligand_tokens(toks_raw, lig.token_atom_names, lig.token_atom_coords, lig.token_bonds)
+                        btype = [btype_raw[i] for i in atomized_parent_idx]
+                        sstype = [sstype_raw[i] for i in atomized_parent_idx]
+                        residue_indices_src = [i - 1 for i in atomized_parent_idx]
                     elseif ccd !== nothing
                         ccds = _as_list(ccd)
                         toks = [haskey(token_ids, _upper(x)) ? _upper(x) : "UNK" for x in ccds]
                         atom_names_src = [String[] for _ in 1:length(toks)]
                         atom_coords_src = [Dict{String,NTuple{3,Float32}}() for _ in 1:length(toks)]
+                        btype = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), length(toks))
+                        sstype = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), length(toks))
+                        residue_indices_src = collect(0:length(toks)-1)
                     else
                         error("Ligand entity requires either 'smiles' or 'ccd'")
                     end
 
                     n = length(toks)
-                    btype = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), n)
-                    sstype = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), n)
+                    length(btype) == n || error("ligand binding_type length mismatch")
+                    length(sstype) == n || error("ligand ss_type length mismatch")
+                    length(residue_indices_src) == n || error("ligand residue index source length mismatch")
 
                     ent_residue_tokens = String[]
                     ent_mol_types = Int[]
@@ -1107,13 +1183,15 @@ function parse_design_yaml(
                     ent_cyclic_period = Int[]
                     ent_msa_paths = Union{Nothing, String}[]
                     ent_sym_ids = Int[]
+                    ent_bonds = NTuple{3,Int}[]
 
                     mt = chain_type_ids["NONPOLYMER"]
                     for id_any in ids
                         cid = string(id_any)
+                        offset = length(ent_residue_tokens)
                         append!(ent_residue_tokens, toks)
                         append!(ent_mol_types, fill(mt, n))
-                        append!(ent_residue_indices, collect(1:n))
+                        append!(ent_residue_indices, residue_indices_src)
                         append!(ent_chain_labels, fill(cid, n))
                         append!(ent_token_atom_names, [copy(atom_names_src[i]) for i in 1:n])
                         append!(ent_token_atom_coords, [copy(atom_coords_src[i]) for i in 1:n])
@@ -1125,6 +1203,9 @@ function parse_design_yaml(
                         append!(ent_cyclic_period, fill(0, n))
                         append!(ent_msa_paths, fill(nothing, n))
                         append!(ent_sym_ids, fill(sym_group, n))
+                        for (i, j, bt) in ligand_internal_bonds_local
+                            push!(ent_bonds, (offset + i, offset + j, bt))
+                        end
                     end
 
                     append_entity!(
@@ -1142,6 +1223,7 @@ function parse_design_yaml(
                         ent_cyclic_period,
                         ent_msa_paths,
                         ent_sym_ids,
+                        ent_bonds,
                         [string(x) for x in ids],
                         fuse_target === nothing ? nothing : string(fuse_target),
                     )
@@ -1151,6 +1233,7 @@ function parse_design_yaml(
                     parsed_file = _parse_file_entity(spec, base_dir, include_nonpolymer, rng)
                     orig_chain_names = unique(parsed_file.chain_labels)
                     fuse_target = _ydict_get(spec, "fuse", nothing)
+                    ent_bonds = NTuple{3,Int}[]
 
                     append_entity!(
                         parsed_file.residue_tokens,
@@ -1167,6 +1250,7 @@ function parse_design_yaml(
                         parsed_file.cyclic_period,
                         parsed_file.msa_paths,
                         parsed_file.sym_ids,
+                        ent_bonds,
                         orig_chain_names,
                         fuse_target === nothing ? nothing : string(fuse_target),
                     )
@@ -1192,7 +1276,6 @@ function parse_design_yaml(
                 push!(token_idxs_by_chain[c], i)
             end
 
-            bonds = NTuple{3, Int}[]
             function add_bond_constraint!(b)
                 a1 = _as_list(_ydict_get(b, "atom1", nothing))
                 a2 = _as_list(_ydict_get(b, "atom2", nothing))
@@ -1214,7 +1297,7 @@ function parse_design_yaml(
                 t1 = idxs1[r1]
                 t2 = idxs2[r2]
                 bt_name = _upper(_ydict_get(b, "bondtype", "COVALENT"))
-                bt_id = get(bond_type_ids, bt_name, get(bond_type_ids, "COVALENT", 1))
+                bt_id = get(bond_type_ids, bt_name, get(bond_type_ids, "COVALENT", 1)) + 1
                 push!(bonds, (t1, t2, bt_id))
             end
 

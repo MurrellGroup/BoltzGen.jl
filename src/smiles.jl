@@ -15,31 +15,32 @@ function _next_atom_name_smiles(sym::String, counts::Dict{String, Int})
     return ncodeunits(short) <= 4 ? short : string(sym[1], mod(n, 999))
 end
 
+function _smiles_bond_type_token_id(bt_any)
+    bt = uppercase(strip(string(bt_any)))
+    bt0 = get(bond_type_ids, bt, bond_type_ids["OTHER"])
+    # Python tokenization stores bond type ids offset by +1 (0 reserved for no-bond).
+    return Int(bt0 + 1)
+end
+
 function _coords_from_molecule_smiles(mol, n_atoms::Int)
     coords3 = get(mol.props, :coordinates_3d, nothing)
-    if coords3 !== nothing && size(coords3, 1) == n_atoms && size(coords3, 2) >= 3
+    coords3 === nothing && error("SMILES conformer is missing :coordinates_3d")
+    size(coords3, 2) >= 3 || error("SMILES conformer has invalid coordinate shape: $(size(coords3))")
+    if size(coords3, 1) == n_atoms
         return Float32.(coords3[:, 1:3])
+    elseif size(coords3, 1) > n_atoms
+        # MoleculeFlow can attach H-expanded conformer coordinates while
+        # `get_atoms` returns heavy atoms only. Keep heavy-atom rows.
+        return Float32.(coords3[1:n_atoms, 1:3])
     end
-
-    coords2 = get(mol.props, :coordinates_2d, nothing)
-    if coords2 !== nothing && size(coords2, 1) == n_atoms && size(coords2, 2) >= 2
-        out = zeros(Float32, n_atoms, 3)
-        out[:, 1] .= Float32.(coords2[:, 1])
-        out[:, 2] .= Float32.(coords2[:, 2])
-        return out
-    end
-
-    out = zeros(Float32, n_atoms, 3)
-    for i in 1:n_atoms
-        out[i, 1] = 1.5f0 * (i - 1)
-    end
-    return out
+    error("SMILES conformer atom count mismatch: coords=$(size(coords3, 1)) atoms=$n_atoms")
 end
 
 function _smiles_to_ligand_tokens_moleculeflow(smiles_list::Vector{String})
     tokens = String[]
     token_atom_names = Vector{Vector{String}}()
     token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+    token_bonds = Vector{Vector{NTuple{3,Int}}}()
 
     for smiles in smiles_list
         s = String(strip(smiles))
@@ -49,12 +50,8 @@ function _smiles_to_ligand_tokens_moleculeflow(smiles_list::Vector{String})
         mol.valid || error("Invalid SMILES: $s")
 
         confs = MoleculeFlow.generate_3d_conformers(mol, 1; random_seed=1)
-        mol_conf = if !isempty(confs)
-            confs[1].molecule
-        else
-            confs2 = MoleculeFlow.generate_2d_conformers(mol)
-            isempty(confs2) ? mol : confs2[1].molecule
-        end
+        isempty(confs) && error("Failed to generate 3D conformer for SMILES: $s")
+        mol_conf = confs[1].molecule
 
         atoms_any = MoleculeFlow.get_atoms(mol_conf)
         atoms_any === missing && error("Failed to extract atoms from SMILES: $s")
@@ -77,15 +74,42 @@ function _smiles_to_ligand_tokens_moleculeflow(smiles_list::Vector{String})
             )
         end
 
+        edge_types = Dict{Tuple{Int,Int},Int}()
+        for i in 1:n_atoms
+            bonds_any = MoleculeFlow.get_bonds_from_atom(mol_conf, i)
+            bonds_any === missing && continue
+            bonds = bonds_any::Vector
+            for bnd in bonds
+                a = Int(MoleculeFlow.get_begin_atom_idx(bnd))
+                b = Int(MoleculeFlow.get_end_atom_idx(bnd))
+                1 <= a <= n_atoms || error("SMILES bond begin index out of range: $a (n_atoms=$n_atoms)")
+                1 <= b <= n_atoms || error("SMILES bond end index out of range: $b (n_atoms=$n_atoms)")
+                a == b && continue
+                i1, i2 = a < b ? (a, b) : (b, a)
+                bt = _smiles_bond_type_token_id(MoleculeFlow.get_bond_type(bnd))
+                if haskey(edge_types, (i1, i2))
+                    edge_types[(i1, i2)] == bt || error("SMILES bond type mismatch for edge ($i1,$i2): $(edge_types[(i1,i2)]) vs $bt")
+                else
+                    edge_types[(i1, i2)] = bt
+                end
+            end
+        end
+        local_bonds = NTuple{3,Int}[]
+        for (edge, bt) in sort(collect(edge_types); by=x -> (x[1][1], x[1][2]))
+            push!(local_bonds, (edge[1], edge[2], bt))
+        end
+
         push!(tokens, "UNK")
         push!(token_atom_names, names)
         push!(token_atom_coords, xyz)
+        push!(token_bonds, local_bonds)
     end
 
     return (
         tokens=tokens,
         token_atom_names=token_atom_names,
         token_atom_coords=token_atom_coords,
+        token_bonds=token_bonds,
     )
 end
 
