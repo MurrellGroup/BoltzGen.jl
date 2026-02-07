@@ -571,6 +571,13 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     insert_spec = _ydict_get(spec, "design_insertions", nothing)
     if insert_spec !== nothing
         num_inserted = Dict{String, Int}()
+        chain_sym_group = Dict{String, Int}()
+        for c in unique(chain_labels)
+            idx = findfirst(==(c), chain_labels)
+            idx === nothing && continue
+            chain_sym_group[c] = sym_ids[idx]
+        end
+        grouped_insert_lengths = Dict{Tuple{Int, Int}, Int}()
         for e in _as_list(insert_spec)
             ins = _ydict_get(e, "insertion", e)
             cid = _ydict_get(ins, "id", nothing)
@@ -585,7 +592,15 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             if !haskey(num_inserted, chain_id)
                 num_inserted[chain_id] = 0
             end
-            nins = rand(rng, _parse_count_spec(num_spec))
+            sym_group = get(chain_sym_group, chain_id, 0)
+            key = (sym_group, res_index)
+            nins = if sym_group > 0
+                get!(grouped_insert_lengths, key) do
+                    rand(rng, _parse_count_spec(num_spec))
+                end
+            else
+                rand(rng, _parse_count_spec(num_spec))
+            end
             r0 = (res_index - 1) + num_inserted[chain_id]
 
             chain_idxs = findall(==(chain_id), chain_labels)
