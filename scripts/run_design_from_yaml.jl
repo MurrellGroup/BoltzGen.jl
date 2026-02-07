@@ -88,12 +88,19 @@ function main()
 
     msa_file = get(args, "msa-file", "")
     msa_max_rows = haskey(args, "msa-max-rows") ? parse(Int, args["msa-max-rows"]) : nothing
-    msa_sequences = isempty(msa_file) ? nothing : BoltzGen.load_msa_sequences(msa_file; max_rows=msa_max_rows)
     template_paths = parse_string_list(get(args, "template-paths", ""))
     template_max_count = haskey(args, "template-max-count") ? parse(Int, args["template-max-count"]) : nothing
     template_chains = haskey(args, "template-chains") ? parse_string_list(args["template-chains"]) : nothing
 
     parsed = BoltzGen.parse_design_yaml(yaml_path; include_nonpolymer=include_nonpolymer)
+    msa_sequences = if isempty(msa_file)
+        parsed.msa_sequences
+    else
+        BoltzGen.load_msa_sequences(msa_file; max_rows=msa_max_rows)
+    end
+    if isempty(msa_file) && parsed.msa_path !== nothing
+        println("Using YAML MSA file: ", parsed.msa_path)
+    end
 
     affinity_token_mask = if haskey(args, "affinity-mask")
         mask = falses(length(parsed.residue_tokens))

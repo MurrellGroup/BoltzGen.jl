@@ -290,6 +290,34 @@ function _resolve_yaml_path(path_raw, base_dir::AbstractString, rng::AbstractRNG
     return normpath(joinpath(base_dir, p))
 end
 
+function _resolve_msa_setting(msa_raw, base_dir::AbstractString, rng::AbstractRNG)
+    if msa_raw === nothing
+        return nothing
+    elseif msa_raw isa AbstractVector
+        isempty(msa_raw) && return nothing
+        return _resolve_msa_setting(rand(rng, collect(msa_raw)), base_dir, rng)
+    elseif msa_raw isa Bool
+        return nothing
+    elseif msa_raw isa Integer
+        return nothing
+    end
+
+    s = strip(string(msa_raw))
+    isempty(s) && return nothing
+    sl = lowercase(s)
+    if sl in ("0", "1", "-1", "auto", "empty", "none", "false", "true", "null")
+        return nothing
+    end
+    if all(c -> (isdigit(c) || c == '-'), s)
+        return nothing
+    end
+
+    if isabspath(s)
+        return normpath(s)
+    end
+    return normpath(joinpath(base_dir, s))
+end
+
 function _resolve_file_entity_spec(spec::AbstractDict, base_dir::AbstractString, rng::AbstractRNG)
     current_spec = spec
     current_base = base_dir
@@ -305,7 +333,7 @@ function _resolve_file_entity_spec(spec::AbstractDict, base_dir::AbstractString,
             current_base = dirname(path)
             continue
         end
-        return current_spec, path
+        return current_spec, path, current_base
     end
 end
 
@@ -358,7 +386,7 @@ function _insert_token!(
 end
 
 function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::Bool, rng::AbstractRNG)
-    spec, path = _resolve_file_entity_spec(spec, base_dir, rng)
+    spec, path, spec_base = _resolve_file_entity_spec(spec, base_dir, rng)
     use_assembly = _as_boolish(_ydict_get(spec, "use_assembly", false), false)
     parsed = load_structure_tokens(path; include_nonpolymer=include_nonpolymer, use_assembly=use_assembly)
 
@@ -377,6 +405,11 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     token_atom_coords = copy(parsed.token_atom_coords)
     target_msa_mask = fill(_as_boolish(_ydict_get(spec, "msa", false), false), length(residue_tokens))
     cyclic_period = zeros(Int, length(residue_tokens))
+    default_msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), spec_base, rng)
+    chain_msa_paths = Dict{String, Union{Nothing, String}}()
+    for c in unique(chain_labels)
+        chain_msa_paths[c] = default_msa_path
+    end
 
     n = length(residue_tokens)
     include_mask = trues(n)
@@ -402,6 +435,13 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             cid === nothing && error("Missing chain.id in include")
             ridx = _ydict_get(c, "res_index", nothing)
             include_mask[chain_global_idxs(string(cid), ridx)] .= true
+            if _ydict_get(c, "msa", nothing) !== nothing
+                chain_msa_paths[string(cid)] = _resolve_msa_setting(_ydict_get(c, "msa", nothing), spec_base, rng)
+            end
+            if _ydict_get(c, "symmetric_group", nothing) !== nothing
+                sym_override = Int(_ydict_get(c, "symmetric_group", 0))
+                sym_ids[chain_global_idxs(string(cid), nothing)] .= sym_override
+            end
         end
     end
 
@@ -621,6 +661,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     structure_group = structure_group[keep]
     target_msa_mask = target_msa_mask[keep]
     cyclic_period = cyclic_period[keep]
+    msa_paths = Union{Nothing, String}[get(chain_msa_paths, chain_labels[i], nothing) for i in eachindex(chain_labels)]
 
     reset_spec = _ydict_get(spec, "reset_res_index", nothing)
     if reset_spec !== nothing
@@ -666,6 +707,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
         structure_group=structure_group,
         target_msa_mask=target_msa_mask,
         cyclic_period=cyclic_period,
+        msa_paths=msa_paths,
     )
 end
 
@@ -770,6 +812,7 @@ function parse_design_yaml(
             structure_group = Int[]
             target_msa_mask = Bool[]
             cyclic_period = Int[]
+            token_msa_paths = Union{Nothing, String}[]
 
             chain_aliases = Dict{String, Vector{String}}()
             used_chain_labels = Set{String}()
@@ -812,6 +855,7 @@ function parse_design_yaml(
                 ent_structure_group,
                 ent_target_msa_mask,
                 ent_cyclic_period,
+                ent_msa_paths,
                 ent_sym_ids,
                 orig_chain_names::Vector{String},
                 fuse_target::Union{Nothing,String}=nothing,
@@ -891,6 +935,7 @@ function parse_design_yaml(
                     push!(structure_group, ent_structure_group[i])
                     push!(target_msa_mask, ent_target_msa_mask[i])
                     push!(cyclic_period, ent_cyclic_period[i])
+                    push!(token_msa_paths, ent_msa_paths[i])
                 end
             end
 
@@ -907,6 +952,7 @@ function parse_design_yaml(
                     n = length(toks)
                     sym_group = Int(_ydict_get(spec, "symmetric_group", 0))
                     msa_flag = _as_boolish(_ydict_get(spec, "msa", false), false)
+                    msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), base_dir, rng)
                     cyclic_flag = _as_boolish(_ydict_get(spec, "cyclic", false), false)
                     cyclic_val = cyclic_flag ? n : 0
                     fuse_target = _ydict_get(spec, "fuse", nothing)
@@ -925,6 +971,7 @@ function parse_design_yaml(
                     ent_structure_group = Int[]
                     ent_target_msa_mask = Bool[]
                     ent_cyclic_period = Int[]
+                    ent_msa_paths = Union{Nothing, String}[]
                     ent_sym_ids = Int[]
 
                     mt = chain_type_ids[chain_type]
@@ -942,6 +989,7 @@ function parse_design_yaml(
                         append!(ent_structure_group, fill(0, n))
                         append!(ent_target_msa_mask, fill(msa_flag, n))
                         append!(ent_cyclic_period, fill(cyclic_val, n))
+                        append!(ent_msa_paths, fill(msa_path, n))
                         append!(ent_sym_ids, fill(sym_group, n))
                     end
 
@@ -958,6 +1006,7 @@ function parse_design_yaml(
                         ent_structure_group,
                         ent_target_msa_mask,
                         ent_cyclic_period,
+                        ent_msa_paths,
                         ent_sym_ids,
                         [string(x) for x in ids],
                         fuse_target === nothing ? nothing : string(fuse_target),
@@ -1006,6 +1055,7 @@ function parse_design_yaml(
                     ent_structure_group = Int[]
                     ent_target_msa_mask = Bool[]
                     ent_cyclic_period = Int[]
+                    ent_msa_paths = Union{Nothing, String}[]
                     ent_sym_ids = Int[]
 
                     mt = chain_type_ids["NONPOLYMER"]
@@ -1023,6 +1073,7 @@ function parse_design_yaml(
                         append!(ent_structure_group, fill(0, n))
                         append!(ent_target_msa_mask, fill(false, n))
                         append!(ent_cyclic_period, fill(0, n))
+                        append!(ent_msa_paths, fill(nothing, n))
                         append!(ent_sym_ids, fill(sym_group, n))
                     end
 
@@ -1039,6 +1090,7 @@ function parse_design_yaml(
                         ent_structure_group,
                         ent_target_msa_mask,
                         ent_cyclic_period,
+                        ent_msa_paths,
                         ent_sym_ids,
                         [string(x) for x in ids],
                         fuse_target === nothing ? nothing : string(fuse_target),
@@ -1063,6 +1115,7 @@ function parse_design_yaml(
                         parsed_file.structure_group,
                         parsed_file.target_msa_mask,
                         parsed_file.cyclic_period,
+                        parsed_file.msa_paths,
                         parsed_file.sym_ids,
                         orig_chain_names,
                         fuse_target === nothing ? nothing : string(fuse_target),
@@ -1157,6 +1210,21 @@ function parse_design_yaml(
                 end
             end
 
+            unique_msa_paths = String[]
+            for p in token_msa_paths
+                p === nothing && continue
+                p in unique_msa_paths || push!(unique_msa_paths, p)
+            end
+            msa_path = nothing
+            msa_sequences = nothing
+            if !isempty(unique_msa_paths)
+                if length(unique_msa_paths) > 1
+                    error("Multiple distinct chain-level MSA files in one YAML are not supported yet: $(join(unique_msa_paths, ", "))")
+                end
+                msa_path = unique_msa_paths[1]
+                msa_sequences = load_msa_sequences(msa_path)
+            end
+
             return (
                 residue_tokens=residue_tokens,
                 mol_types=mol_types,
@@ -1174,6 +1242,8 @@ function parse_design_yaml(
                 target_msa_mask=target_msa_mask,
                 cyclic_period=cyclic_period,
                 bonds=bonds,
+                msa_path=msa_path,
+                msa_sequences=msa_sequences,
             )
         catch err
             if total_len === nothing
