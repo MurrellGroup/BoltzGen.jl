@@ -429,8 +429,10 @@ function build_design_features(
     batch::Int=1,
     pad_atom_multiple::Int=32,
     force_atom14_for_designed_protein::Bool=true,
+    augment_ref_pos::Bool=false,
     token_atom_names_override::Union{Nothing,Vector{Vector{String}}}=nothing,
     token_atom_coords_override::Union{Nothing,Vector{Dict{String,NTuple{3,Float32}}}}=nothing,
+    token_atom_ref_coords_override::Union{Nothing,Vector{Dict{String,NTuple{3,Float32}}}}=nothing,
     center_coords_override::Union{Nothing,Vector{NTuple{3,Float32}}}=nothing,
 )
     T = length(residue_tokens)
@@ -468,6 +470,7 @@ function build_design_features(
     length(affinity_token_mask_v) == T || error("affinity_token_mask length mismatch")
     token_atom_names_override === nothing || length(token_atom_names_override) == T || error("token_atom_names_override length mismatch")
     token_atom_coords_override === nothing || length(token_atom_coords_override) == T || error("token_atom_coords_override length mismatch")
+    token_atom_ref_coords_override === nothing || length(token_atom_ref_coords_override) == T || error("token_atom_ref_coords_override length mismatch")
     center_coords_override === nothing || length(center_coords_override) == T || error("center_coords_override length mismatch")
 
     if chain_design_mask === nothing
@@ -696,6 +699,7 @@ function build_design_features(
             atoms = token_atom_names[t]
             offset = token_atom_offsets[t]
             atom_coord_override = token_atom_coords_override === nothing ? nothing : token_atom_coords_override[t]
+            atom_ref_coord_override = token_atom_ref_coords_override === nothing ? atom_coord_override : token_atom_ref_coords_override[t]
             is_nonpoly = mol_types_v[t] == chain_type_ids["NONPOLYMER"]
 
             for (j, atom_name) in enumerate(atoms)
@@ -709,16 +713,18 @@ function build_design_features(
                 atom_to_token[m, t, b] = 1f0
                 ref_space_uid[m, b] = token_space_uid[t]
                 ref_atom_name_chars[:, :, m, b] .= encode_atom_name_chars(atom_name)
-                if atom_coord_override !== nothing && haskey(atom_coord_override, atom_name)
+                if atom_ref_coord_override !== nothing && haskey(atom_ref_coord_override, atom_name)
+                    xyz = atom_ref_coord_override[atom_name]
+                    ref_pos[1, m, b] = xyz[1]
+                    ref_pos[2, m, b] = xyz[2]
+                    ref_pos[3, m, b] = xyz[3]
+                elseif atom_coord_override !== nothing && haskey(atom_coord_override, atom_name)
                     xyz = atom_coord_override[atom_name]
                     ref_pos[1, m, b] = xyz[1]
                     ref_pos[2, m, b] = xyz[2]
                     ref_pos[3, m, b] = xyz[3]
-                    coords[1, m, b] = xyz[1]
-                    coords[2, m, b] = xyz[2]
-                    coords[3, m, b] = xyz[3]
                 elseif is_nonpoly
-                    error("Missing coordinate override for NONPOLYMER atom '$atom_name' at token index $t")
+                    error("Missing reference coordinate override for NONPOLYMER atom '$atom_name' at token index $t")
                 elseif haskey(ref_atom_pos, tok)
                     tok_ref_pos = ref_atom_pos[tok]
                     if haskey(tok_ref_pos, atom_name)
@@ -727,6 +733,14 @@ function build_design_features(
                         ref_pos[2, m, b] = xyz[2]
                         ref_pos[3, m, b] = xyz[3]
                     end
+                end
+                if atom_coord_override !== nothing && haskey(atom_coord_override, atom_name)
+                    xyz = atom_coord_override[atom_name]
+                    coords[1, m, b] = xyz[1]
+                    coords[2, m, b] = xyz[2]
+                    coords[3, m, b] = xyz[3]
+                elseif is_nonpoly
+                    error("Missing coordinate override for NONPOLYMER atom '$atom_name' at token index $t")
                 end
                 if haskey(ref_atom_charge, tok)
                     tok_ref_charge = ref_atom_charge[tok]
@@ -776,9 +790,9 @@ function build_design_features(
                 center_coords[2, t, b] = ctr[2]
                 center_coords[3, t, b] = ctr[3]
             elseif atom_coord_override !== nothing && rep_m <= M
-                center_coords[1, t, b] = ref_pos[1, rep_m, b]
-                center_coords[2, t, b] = ref_pos[2, rep_m, b]
-                center_coords[3, t, b] = ref_pos[3, rep_m, b]
+                center_coords[1, t, b] = coords[1, rep_m, b]
+                center_coords[2, t, b] = coords[2, rep_m, b]
+                center_coords[3, t, b] = coords[3, rep_m, b]
             end
 
             frames_idx[t, 1, b] = offset + idx_a - 2
@@ -818,16 +832,16 @@ function build_design_features(
             for i in 1:num_atoms_chain
                 mi = atom_ids[i]
                 ri = atom_resolved_mask[mi, b] > 0.5f0
-                xi = ref_pos[1, mi, b]
-                yi = ref_pos[2, mi, b]
-                zi = ref_pos[3, mi, b]
+                xi = coords[1, mi, b]
+                yi = coords[2, mi, b]
+                zi = coords[3, mi, b]
                 for j in 1:num_atoms_chain
                     mj = atom_ids[j]
                     rj = atom_resolved_mask[mj, b] > 0.5f0
                     if ri && rj
-                        dx = xi - ref_pos[1, mj, b]
-                        dy = yi - ref_pos[2, mj, b]
-                        dz = zi - ref_pos[3, mj, b]
+                        dx = xi - coords[1, mj, b]
+                        dy = yi - coords[2, mj, b]
+                        dz = zi - coords[3, mj, b]
                         dist[i, j] = sqrt(dx * dx + dy * dy + dz * dz)
                     end
                 end
@@ -843,6 +857,24 @@ function build_design_features(
                 frames_idx[t, 1, b] = atom_ids[ord[2]] - 1
                 frames_idx[t, 2, b] = atom_ids[ord[1]] - 1
                 frames_idx[t, 3, b] = atom_ids[ord[3]] - 1
+            end
+        end
+
+        if augment_ref_pos
+            # Match python featurizer loop:
+            #   for i in range(torch.max(ref_space_uid)):
+            max_uid = Int(maximum(ref_space_uid[:, b]))
+            if max_uid > 0
+                for uid in 0:(max_uid - 1)
+                    included = findall(ref_space_uid[:, b] .== uid)
+                    isempty(included) && continue
+                    has_resolved = any(atom_resolved_mask[included, b] .> 0.5f0)
+                    has_resolved || continue
+                    rp = reshape(ref_pos[:, included, b], 3, length(included), 1)
+                    rm = reshape(atom_resolved_mask[included, b], length(included), 1)
+                    rp_aug = center_random_augmentation(rp, rm; augmentation=true, centering=true)
+                    ref_pos[:, included, b] .= rp_aug[:, :, 1]
+                end
             end
         end
 

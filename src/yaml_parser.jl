@@ -30,6 +30,56 @@ function _upper(x)
     return uppercase(strip(string(x)))
 end
 
+function _make_sampling_state(sampling_plan)
+    if sampling_plan === nothing
+        return (mode=:none, decisions=Any[], idx=Ref(1))
+    end
+    decisions = _ydict_get(sampling_plan, "decisions", nothing)
+    decisions isa AbstractVector || error("Sampling plan must contain a 'decisions' vector")
+    return (mode=:replay, decisions=collect(decisions), idx=Ref(1))
+end
+
+function _plan_take!(sampling_state, expected_kind::AbstractString)
+    sampling_state.mode === :none && return nothing
+    i = sampling_state.idx[]
+    i <= length(sampling_state.decisions) || error("Sampling plan exhausted before parser completed (expected kind '$expected_kind')")
+    d = sampling_state.decisions[i]
+    sampling_state.idx[] = i + 1
+    got_kind = string(_ydict_get(d, "kind", ""))
+    got_kind == expected_kind || error("Sampling plan mismatch at decision #$(i): expected '$expected_kind', got '$got_kind'")
+    return d
+end
+
+function _sample_polymer_range(lo::Int, hi::Int, rng::AbstractRNG, sampling_state)
+    if sampling_state.mode === :none
+        return rand(rng, lo:hi)
+    end
+    d = _plan_take!(sampling_state, "np.random.randint")
+    args = _as_list(_ydict_get(d, "args", Any[]))
+    length(args) >= 2 || error("Sampling plan randint decision missing args")
+    plan_lo = Int(args[1])
+    plan_hi_exclusive = Int(args[2])
+    plan_lo == lo || error("Sampling plan randint low mismatch: plan=$(plan_lo), parser=$(lo)")
+    plan_hi_exclusive == (hi + 1) || error("Sampling plan randint high mismatch: plan=$(plan_hi_exclusive), parser=$(hi + 1)")
+    v = Int(_ydict_get(d, "result", typemin(Int)))
+    lo <= v <= hi || error("Sampling plan randint result out of range: result=$(v), expected in [$(lo), $(hi)]")
+    return v
+end
+
+function _sample_choice(options::AbstractVector, rng::AbstractRNG, sampling_state, kind::AbstractString)
+    if sampling_state.mode === :none
+        return rand(rng, options)
+    end
+    d = _plan_take!(sampling_state, kind)
+    plan_opts = [string(x) for x in _as_list(_ydict_get(d, "options", Any[]))]
+    local_opts = [string(x) for x in options]
+    plan_opts == local_opts || error("Sampling plan options mismatch for kind '$kind'")
+    result = string(_ydict_get(d, "result", ""))
+    idx = findfirst(==(result), local_opts)
+    idx === nothing && error("Sampling plan result '$result' not present in parser options for kind '$kind'")
+    return options[idx]
+end
+
 function _as_boolish(x, default::Bool=false)
     if x === nothing
         return default
@@ -103,12 +153,14 @@ function _parse_count_spec(spec)
     if occursin("..", s)
         bits = split(s, "..")
         length(bits) == 2 || error("Invalid count spec: $s")
-        lo = parse(Int, strip(bits[1]))
-        hi = parse(Int, strip(bits[2]))
+        lo = parse(Int, strip(bits[1])) - 1
+        hi = parse(Int, strip(bits[2])) - 1
         lo <= hi || ((lo, hi) = (hi, lo))
+        lo >= 0 || error("Count spec lower bound must be >= 1: $s")
         return collect(lo:hi)
     end
-    n = parse(Int, s)
+    n = parse(Int, s) - 1
+    n >= 0 || error("Count spec value must be >= 1: $s")
     return [n]
 end
 
@@ -136,7 +188,7 @@ function _letter_to_token(chain_type::AbstractString, c::Char)
     return "UNK"
 end
 
-function _parse_polymer_sequence(raw::AbstractString, chain_type::AbstractString, rng::AbstractRNG)
+function _parse_polymer_sequence(raw::AbstractString, chain_type::AbstractString, rng::AbstractRNG, sampling_state)
     tokens = String[]
     design_mask = Bool[]
 
@@ -150,7 +202,7 @@ function _parse_polymer_sequence(raw::AbstractString, chain_type::AbstractString
                 lo = parse(Int, bits[1])
                 hi = parse(Int, bits[2])
                 lo <= hi || ((lo, hi) = (hi, lo))
-                n = rand(rng, lo:hi)
+                n = _sample_polymer_range(lo, hi, rng, sampling_state)
                 append!(tokens, fill(_default_design_token(chain_type), n))
                 append!(design_mask, fill(true, n))
             elseif all(isdigit, tok)
@@ -362,10 +414,10 @@ function _token_center(tok::String, mol_type_id::Int, atom_names::Vector{String}
     return (sx * invn, sy * invn, sz * invn)
 end
 
-function _resolve_yaml_path(path_raw, base_dir::AbstractString, rng::AbstractRNG)
+function _resolve_yaml_path(path_raw, base_dir::AbstractString, rng::AbstractRNG, sampling_state)
     if path_raw isa AbstractVector
         isempty(path_raw) && error("Empty path list in YAML")
-        path_raw = rand(rng, collect(path_raw))
+        path_raw = _sample_choice(collect(path_raw), rng, sampling_state, "random.choice")
     end
     p = string(path_raw)
     if isabspath(p)
@@ -374,12 +426,12 @@ function _resolve_yaml_path(path_raw, base_dir::AbstractString, rng::AbstractRNG
     return normpath(joinpath(base_dir, p))
 end
 
-function _resolve_msa_setting(msa_raw, base_dir::AbstractString, rng::AbstractRNG)
+function _resolve_msa_setting(msa_raw, base_dir::AbstractString, rng::AbstractRNG, sampling_state)
     if msa_raw === nothing
         return nothing
     elseif msa_raw isa AbstractVector
         isempty(msa_raw) && return nothing
-        return _resolve_msa_setting(rand(rng, collect(msa_raw)), base_dir, rng)
+        return _resolve_msa_setting(_sample_choice(collect(msa_raw), rng, sampling_state, "random.choice"), base_dir, rng, sampling_state)
     elseif msa_raw isa Bool
         return nothing
     elseif msa_raw isa Integer
@@ -402,13 +454,13 @@ function _resolve_msa_setting(msa_raw, base_dir::AbstractString, rng::AbstractRN
     return normpath(joinpath(base_dir, s))
 end
 
-function _resolve_file_entity_spec(spec::AbstractDict, base_dir::AbstractString, rng::AbstractRNG)
+function _resolve_file_entity_spec(spec::AbstractDict, base_dir::AbstractString, rng::AbstractRNG, sampling_state)
     current_spec = spec
     current_base = base_dir
 
     while true
         path_raw = _ydict_get(current_spec, "path", nothing)
-        path = _resolve_yaml_path(path_raw, current_base, rng)
+        path = _resolve_yaml_path(path_raw, current_base, rng, sampling_state)
         lower = lowercase(path)
         if endswith(lower, ".yaml") || endswith(lower, ".yml")
             nested = YAML.load_file(path)
@@ -469,8 +521,8 @@ function _insert_token!(
     insert!(cyclic_period, idx, cyclic_p)
 end
 
-function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::Bool, rng::AbstractRNG)
-    spec, path, spec_base = _resolve_file_entity_spec(spec, base_dir, rng)
+function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::Bool, rng::AbstractRNG, sampling_state)
+    spec, path, spec_base = _resolve_file_entity_spec(spec, base_dir, rng, sampling_state)
     use_assembly = _as_boolish(_ydict_get(spec, "use_assembly", false), false)
     parsed = load_structure_tokens(path; include_nonpolymer=include_nonpolymer, use_assembly=use_assembly)
 
@@ -489,7 +541,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     token_atom_coords = copy(parsed.token_atom_coords)
     target_msa_mask = fill(_as_boolish(_ydict_get(spec, "msa", false), false), length(residue_tokens))
     cyclic_period = zeros(Int, length(residue_tokens))
-    default_msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), spec_base, rng)
+    default_msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), spec_base, rng, sampling_state)
     chain_msa_paths = Dict{String, Union{Nothing, String}}()
     for c in unique(chain_labels)
         chain_msa_paths[c] = default_msa_path
@@ -520,7 +572,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             ridx = _ydict_get(c, "res_index", nothing)
             include_mask[chain_global_idxs(string(cid), ridx)] .= true
             if _ydict_get(c, "msa", nothing) !== nothing
-                chain_msa_paths[string(cid)] = _resolve_msa_setting(_ydict_get(c, "msa", nothing), spec_base, rng)
+                chain_msa_paths[string(cid)] = _resolve_msa_setting(_ydict_get(c, "msa", nothing), spec_base, rng, sampling_state)
             end
             if _ydict_get(c, "symmetric_group", nothing) !== nothing
                 sym_override = Int(_ydict_get(c, "symmetric_group", 0))
@@ -678,13 +730,14 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             end
             sym_group = get(chain_sym_group, chain_id, 0)
             key = (sym_group, res_index)
-            nins = if sym_group > 0
+            sampled_nins = if sym_group > 0
                 get!(grouped_insert_lengths, key) do
-                    rand(rng, _parse_count_spec(num_spec))
+                    _sample_choice(_parse_count_spec(num_spec), rng, sampling_state, "np.random.choice")
                 end
             else
-                rand(rng, _parse_count_spec(num_spec))
+                _sample_choice(_parse_count_spec(num_spec), rng, sampling_state, "np.random.choice")
             end
+            nins = sampled_nins + 1
             r0 = (res_index - 1) + num_inserted[chain_id]
 
             chain_idxs = findall(==(chain_id), chain_labels)
@@ -885,6 +938,7 @@ function parse_design_yaml(
     yaml_path::AbstractString;
     include_nonpolymer::Bool=true,
     rng::AbstractRNG=Random.default_rng(),
+    sampling_plan=nothing,
     max_total_len_trials::Int=128,
 )
     base_dir = dirname(abspath(yaml_path))
@@ -892,6 +946,7 @@ function parse_design_yaml(
     schema = _canonicalize_schema(raw)
     total_len = _extract_total_len(schema)
     last_sampled_total_len = nothing
+    sampling_state = _make_sampling_state(sampling_plan)
 
     for _ in 1:max_total_len_trials
         residue_tokens = String[]
@@ -903,6 +958,7 @@ function parse_design_yaml(
         chain_labels = String[]
         token_atom_names = Vector{Vector{String}}()
         token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+        token_atom_ref_coords = Vector{Dict{String,NTuple{3,Float32}}}()
         design_mask = Bool[]
         binding_type = Int[]
         ss_type = Int[]
@@ -947,6 +1003,7 @@ function parse_design_yaml(
                 ent_chain_labels,
                 ent_token_atom_names,
                 ent_token_atom_coords,
+                ent_token_atom_ref_coords,
                 ent_design_mask,
                 ent_binding_type,
                 ent_ss_type,
@@ -1031,6 +1088,7 @@ function parse_design_yaml(
                     push!(chain_labels, c_eff)
                     push!(token_atom_names, ent_token_atom_names[i])
                     push!(token_atom_coords, ent_token_atom_coords[i])
+                    push!(token_atom_ref_coords, ent_token_atom_ref_coords[i])
                     push!(design_mask, ent_design_mask[i])
                     push!(binding_type, ent_binding_type[i])
                     push!(ss_type, ent_ss_type[i])
@@ -1061,11 +1119,11 @@ function parse_design_yaml(
                     isempty(ids) && error("Missing id for $chain_type entity")
                     seq = _ydict_get(spec, "sequence", nothing)
                     seq === nothing && error("Missing sequence for $chain_type entity")
-                    toks, dmask = _parse_polymer_sequence(string(seq), chain_type, rng)
+                    toks, dmask = _parse_polymer_sequence(string(seq), chain_type, rng, sampling_state)
                     n = length(toks)
                     sym_group = Int(_ydict_get(spec, "symmetric_group", 0))
                     msa_flag = _as_boolish(_ydict_get(spec, "msa", false), false)
-                    msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), base_dir, rng)
+                    msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), base_dir, rng, sampling_state)
                     cyclic_flag = _as_boolish(_ydict_get(spec, "cyclic", false), false)
                     cyclic_val = cyclic_flag ? n : 0
                     fuse_target = _ydict_get(spec, "fuse", nothing)
@@ -1078,6 +1136,7 @@ function parse_design_yaml(
                     ent_chain_labels = String[]
                     ent_token_atom_names = Vector{Vector{String}}()
                     ent_token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+                    ent_token_atom_ref_coords = Vector{Dict{String,NTuple{3,Float32}}}()
                     ent_design_mask = Bool[]
                     ent_binding_type = Int[]
                     ent_ss_type = Int[]
@@ -1097,6 +1156,7 @@ function parse_design_yaml(
                         append!(ent_chain_labels, fill(cid, n))
                         append!(ent_token_atom_names, [String[] for _ in 1:n])
                         append!(ent_token_atom_coords, [Dict{String,NTuple{3,Float32}}() for _ in 1:n])
+                        append!(ent_token_atom_ref_coords, [Dict{String,NTuple{3,Float32}}() for _ in 1:n])
                         append!(ent_design_mask, dmask)
                         append!(ent_binding_type, btype)
                         append!(ent_ss_type, sstype)
@@ -1114,6 +1174,7 @@ function parse_design_yaml(
                         ent_chain_labels,
                         ent_token_atom_names,
                         ent_token_atom_coords,
+                        ent_token_atom_ref_coords,
                         ent_design_mask,
                         ent_binding_type,
                         ent_ss_type,
@@ -1175,6 +1236,7 @@ function parse_design_yaml(
                     ent_chain_labels = String[]
                     ent_token_atom_names = Vector{Vector{String}}()
                     ent_token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+                    ent_token_atom_ref_coords = Vector{Dict{String,NTuple{3,Float32}}}()
                     ent_design_mask = Bool[]
                     ent_binding_type = Int[]
                     ent_ss_type = Int[]
@@ -1194,7 +1256,8 @@ function parse_design_yaml(
                         append!(ent_residue_indices, residue_indices_src)
                         append!(ent_chain_labels, fill(cid, n))
                         append!(ent_token_atom_names, [copy(atom_names_src[i]) for i in 1:n])
-                        append!(ent_token_atom_coords, [copy(atom_coords_src[i]) for i in 1:n])
+                        append!(ent_token_atom_coords, [Dict{String,NTuple{3,Float32}}(nm => (0f0, 0f0, 0f0) for nm in atom_names_src[i]) for i in 1:n])
+                        append!(ent_token_atom_ref_coords, [copy(atom_coords_src[i]) for i in 1:n])
                         append!(ent_design_mask, fill(false, n))
                         append!(ent_binding_type, btype)
                         append!(ent_ss_type, sstype)
@@ -1215,6 +1278,7 @@ function parse_design_yaml(
                         ent_chain_labels,
                         ent_token_atom_names,
                         ent_token_atom_coords,
+                        ent_token_atom_ref_coords,
                         ent_design_mask,
                         ent_binding_type,
                         ent_ss_type,
@@ -1230,7 +1294,7 @@ function parse_design_yaml(
 
                 elseif _ydict_get(e, "file", nothing) !== nothing
                     spec = _ydict_get(e, "file", nothing)
-                    parsed_file = _parse_file_entity(spec, base_dir, include_nonpolymer, rng)
+                    parsed_file = _parse_file_entity(spec, base_dir, include_nonpolymer, rng, sampling_state)
                     orig_chain_names = unique(parsed_file.chain_labels)
                     fuse_target = _ydict_get(spec, "fuse", nothing)
                     ent_bonds = NTuple{3,Int}[]
@@ -1241,6 +1305,7 @@ function parse_design_yaml(
                         parsed_file.residue_indices,
                         parsed_file.chain_labels,
                         parsed_file.token_atom_names,
+                        parsed_file.token_atom_coords,
                         parsed_file.token_atom_coords,
                         parsed_file.design_mask,
                         parsed_file.binding_type,
@@ -1341,6 +1406,12 @@ function parse_design_yaml(
                             delete!(coords, key)
                         end
                     end
+                    ref_coords = token_atom_ref_coords[t]
+                    for key in collect(keys(ref_coords))
+                        if uppercase(strip(key)) == upper_atom_name
+                            delete!(ref_coords, key)
+                        end
+                    end
                 end
             end
 
@@ -1429,6 +1500,11 @@ function parse_design_yaml(
                 end
             end
 
+        if sampling_state.mode === :replay && sampling_state.idx[] <= length(sampling_state.decisions)
+            remaining = length(sampling_state.decisions) - sampling_state.idx[] + 1
+            error("Sampling plan has unused decisions after parse completion: $(remaining)")
+        end
+
         return (
             residue_tokens=residue_tokens,
             mol_types=mol_types,
@@ -1439,6 +1515,7 @@ function parse_design_yaml(
             chain_labels=chain_labels,
             token_atom_names=token_atom_names,
             token_atom_coords=token_atom_coords,
+            token_atom_ref_coords=token_atom_ref_coords,
             design_mask=design_mask,
             binding_type=binding_type,
             ss_type=ss_type,

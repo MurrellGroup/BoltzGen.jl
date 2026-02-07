@@ -180,9 +180,11 @@ function main()
         max_templates=template_max_count,
         template_include_chains=template_chains,
         bonds=parsed.bonds,
+        augment_ref_pos=true,
         batch=1,
         token_atom_names_override=parsed.token_atom_names,
         token_atom_coords_override=parsed.token_atom_coords,
+        token_atom_ref_coords_override=parsed.token_atom_ref_coords,
     )
 
     feats_masked = BoltzGen.boltz_masker(feats; mask=true, mask_backbone=false)
