@@ -167,6 +167,43 @@ function _parse_polymer_sequence(raw::AbstractString, chain_type::AbstractString
     return tokens, design_mask
 end
 
+function _token_to_msa_char(tok::AbstractString, mol_type_id::Int)
+    t = uppercase(strip(String(tok)))
+    if t == "-"
+        return '-'
+    end
+    if mol_type_id == chain_type_ids["PROTEIN"]
+        t == "UNK" && return 'X'
+        for (letter, token) in prot_letter_to_token
+            token == t && return letter
+        end
+        return 'X'
+    elseif mol_type_id == chain_type_ids["DNA"]
+        if t == "DA"
+            return 'A'
+        elseif t == "DG"
+            return 'G'
+        elseif t == "DC"
+            return 'C'
+        elseif t == "DT"
+            return 'T'
+        end
+        return 'N'
+    elseif mol_type_id == chain_type_ids["RNA"]
+        if t == "A"
+            return 'A'
+        elseif t == "G"
+            return 'G'
+        elseif t == "C"
+            return 'C'
+        elseif t == "U"
+            return 'U'
+        end
+        return 'N'
+    end
+    return 'X'
+end
+
 function _parse_binding_spec(spec, n::Int)
     out = fill(binding_type_ids["UNSPECIFIED"], n)
     if spec === nothing
@@ -1232,12 +1269,82 @@ function parse_design_yaml(
             end
             msa_path = nothing
             msa_sequences = nothing
+            msa_paired_rows = nothing
+            msa_has_deletion_rows = nothing
+            msa_deletion_value_rows = nothing
             if !isempty(unique_msa_paths)
-                if length(unique_msa_paths) > 1
-                    error("Multiple distinct chain-level MSA files in one YAML are not supported yet: $(join(unique_msa_paths, ", "))")
+                chain_idxs = Dict{String, Vector{Int}}()
+                chain_order = String[]
+                for i in eachindex(chain_labels)
+                    c = chain_labels[i]
+                    if !haskey(chain_idxs, c)
+                        chain_idxs[c] = Int[]
+                        push!(chain_order, c)
+                    end
+                    push!(chain_idxs[c], i)
                 end
-                msa_path = unique_msa_paths[1]
-                msa_sequences = load_msa_sequences(msa_path)
+
+                chain_msa_rows = Dict{String, Union{Nothing, Vector{String}}}()
+                max_rows = 1
+                for c in chain_order
+                    idxs = chain_idxs[c]
+                    chain_paths = String[]
+                    for idx in idxs
+                        p = token_msa_paths[idx]
+                        p === nothing && continue
+                        p in chain_paths || push!(chain_paths, p)
+                    end
+                    if length(chain_paths) > 1
+                        error("Chain '$c' references multiple MSA paths after preprocessing: $(join(chain_paths, ", "))")
+                    elseif isempty(chain_paths)
+                        chain_msa_rows[c] = nothing
+                    else
+                        rows = load_msa_sequences(chain_paths[1])
+                        chain_msa_rows[c] = rows
+                        max_rows = max(max_rows, length(rows))
+                    end
+                end
+
+                msa_rows = Vector{String}(undef, max_rows)
+                paired_rows = falses(max_rows)
+                paired_rows[1] = true
+                has_del_rows = zeros(Float32, max_rows, T)
+                del_val_rows = zeros(Float32, max_rows, T)
+
+                for s in 1:max_rows
+                    row_chars = fill('-', T)
+                    for c in chain_order
+                        idxs = chain_idxs[c]
+                        crows = chain_msa_rows[c]
+                        chain_len = length(idxs)
+                        if crows === nothing
+                            if s == 1
+                                for (k, tidx) in enumerate(idxs)
+                                    row_chars[tidx] = _token_to_msa_char(residue_tokens[tidx], mol_types[tidx])
+                                end
+                            end
+                            continue
+                        end
+                        if s > length(crows)
+                            continue
+                        end
+                        row_norm, has_del_chain, del_val_chain = _normalize_msa_row(crows[s], chain_len)
+                        for (k, tidx) in enumerate(idxs)
+                            row_chars[tidx] = row_norm[k]
+                            has_del_rows[s, tidx] = has_del_chain[k]
+                            del_val_rows[s, tidx] = del_val_chain[k]
+                        end
+                    end
+                    msa_rows[s] = String(row_chars)
+                end
+
+                msa_sequences = msa_rows
+                msa_paired_rows = paired_rows
+                msa_has_deletion_rows = has_del_rows
+                msa_deletion_value_rows = del_val_rows
+                if length(unique_msa_paths) == 1
+                    msa_path = unique_msa_paths[1]
+                end
             end
 
             return (
@@ -1258,7 +1365,11 @@ function parse_design_yaml(
                 cyclic_period=cyclic_period,
                 bonds=bonds,
                 msa_path=msa_path,
+                msa_paths=unique_msa_paths,
                 msa_sequences=msa_sequences,
+                msa_paired_rows=msa_paired_rows,
+                msa_has_deletion_rows=msa_has_deletion_rows,
+                msa_deletion_value_rows=msa_deletion_value_rows,
             )
         catch err
             if total_len === nothing

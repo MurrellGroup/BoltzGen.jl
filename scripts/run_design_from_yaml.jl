@@ -98,8 +98,13 @@ function main()
     else
         BoltzGen.load_msa_sequences(msa_file; max_rows=msa_max_rows)
     end
+    msa_paired_rows = isempty(msa_file) ? get(parsed, :msa_paired_rows, nothing) : nothing
+    msa_has_deletion_rows = isempty(msa_file) ? get(parsed, :msa_has_deletion_rows, nothing) : nothing
+    msa_deletion_value_rows = isempty(msa_file) ? get(parsed, :msa_deletion_value_rows, nothing) : nothing
     if isempty(msa_file) && parsed.msa_path !== nothing
         println("Using YAML MSA file: ", parsed.msa_path)
+    elseif isempty(msa_file) && haskey(parsed, :msa_paths) && length(parsed.msa_paths) > 1
+        println("Using merged YAML MSA files: ", join(parsed.msa_paths, ", "))
     end
 
     affinity_token_mask = if haskey(args, "affinity-mask")
@@ -145,6 +150,9 @@ function main()
         structure_group=parsed.structure_group,
         target_msa_mask=parsed.target_msa_mask,
         msa_sequences=msa_sequences,
+        msa_paired_rows=msa_paired_rows,
+        msa_has_deletion_rows=msa_has_deletion_rows,
+        msa_deletion_value_rows=msa_deletion_value_rows,
         max_msa_rows=msa_max_rows,
         affinity_token_mask=affinity_token_mask,
         affinity_mw=affinity_mw,
