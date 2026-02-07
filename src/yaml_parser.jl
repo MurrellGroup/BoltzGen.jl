@@ -844,26 +844,25 @@ function parse_design_yaml(
     raw = YAML.load_file(yaml_path)
     schema = _canonicalize_schema(raw)
     total_len = _extract_total_len(schema)
+    last_sampled_total_len = nothing
 
-    last_err = nothing
     for _ in 1:max_total_len_trials
-        try
-            residue_tokens = String[]
-            mol_types = Int[]
-            asym_ids = Int[]
-            entity_ids = Int[]
-            sym_ids = Int[]
-            residue_indices = Int[]
-            chain_labels = String[]
-            token_atom_names = Vector{Vector{String}}()
-            token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
-            design_mask = Bool[]
-            binding_type = Int[]
-            ss_type = Int[]
-            structure_group = Int[]
-            target_msa_mask = Bool[]
-            cyclic_period = Int[]
-            token_msa_paths = Union{Nothing, String}[]
+        residue_tokens = String[]
+        mol_types = Int[]
+        asym_ids = Int[]
+        entity_ids = Int[]
+        sym_ids = Int[]
+        residue_indices = Int[]
+        chain_labels = String[]
+        token_atom_names = Vector{Vector{String}}()
+        token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+        design_mask = Bool[]
+        binding_type = Int[]
+        ss_type = Int[]
+        structure_group = Int[]
+        target_msa_mask = Bool[]
+        cyclic_period = Int[]
+        token_msa_paths = Union{Nothing, String}[]
 
             chain_aliases = Dict{String, Vector{String}}()
             used_chain_labels = Set{String}()
@@ -1179,6 +1178,7 @@ function parse_design_yaml(
             T = length(residue_tokens)
             if total_len !== nothing
                 if !(total_len.min <= T <= total_len.max)
+                    last_sampled_total_len = T
                     continue
                 end
             end
@@ -1346,40 +1346,38 @@ function parse_design_yaml(
                 end
             end
 
-            return (
-                residue_tokens=residue_tokens,
-                mol_types=mol_types,
-                asym_ids=asym_ids,
-                entity_ids=entity_ids,
-                sym_ids=sym_ids,
-                residue_indices=residue_indices,
-                chain_labels=chain_labels,
-                token_atom_names=token_atom_names,
-                token_atom_coords=token_atom_coords,
-                design_mask=design_mask,
-                binding_type=binding_type,
-                ss_type=ss_type,
-                structure_group=structure_group,
-                target_msa_mask=target_msa_mask,
-                cyclic_period=cyclic_period,
-                bonds=bonds,
-                msa_path=msa_path,
-                msa_paths=unique_msa_paths,
-                msa_sequences=msa_sequences,
-                msa_paired_rows=msa_paired_rows,
-                msa_has_deletion_rows=msa_has_deletion_rows,
-                msa_deletion_value_rows=msa_deletion_value_rows,
-            )
-        catch err
-            if total_len === nothing
-                rethrow(err)
-            end
-            last_err = err
-        end
+        return (
+            residue_tokens=residue_tokens,
+            mol_types=mol_types,
+            asym_ids=asym_ids,
+            entity_ids=entity_ids,
+            sym_ids=sym_ids,
+            residue_indices=residue_indices,
+            chain_labels=chain_labels,
+            token_atom_names=token_atom_names,
+            token_atom_coords=token_atom_coords,
+            design_mask=design_mask,
+            binding_type=binding_type,
+            ss_type=ss_type,
+            structure_group=structure_group,
+            target_msa_mask=target_msa_mask,
+            cyclic_period=cyclic_period,
+            bonds=bonds,
+            msa_path=msa_path,
+            msa_paths=unique_msa_paths,
+            msa_sequences=msa_sequences,
+            msa_paired_rows=msa_paired_rows,
+            msa_has_deletion_rows=msa_has_deletion_rows,
+            msa_deletion_value_rows=msa_deletion_value_rows,
+        )
     end
 
-    if last_err !== nothing
-        throw(last_err)
+    if total_len !== nothing
+        sampled = last_sampled_total_len === nothing ? "unknown" : string(last_sampled_total_len)
+        error(
+            "Failed to satisfy total_len constraints after $(max_total_len_trials) attempts " *
+            "(min=$(total_len.min), max=$(total_len.max), last_sampled_len=$(sampled)).",
+        )
     end
     error("Failed to parse YAML after $(max_total_len_trials) attempts")
 end

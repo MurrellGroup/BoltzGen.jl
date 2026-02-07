@@ -40,9 +40,11 @@ end
 
 with_affinity = lowercase(option_value(forwarded, "with-affinity", "false")) == "true"
 if !has_option(forwarded, "weights")
-    default_weights = with_affinity ?
-        joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors") :
+    default_weights = if with_affinity
+        joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors")
+    else
         joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors")
+    end
     push!(forwarded, "--weights")
     push!(forwarded, default_weights)
 end

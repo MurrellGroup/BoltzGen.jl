@@ -82,9 +82,8 @@ end
 
 function default_weights_for_family(model_family::AbstractString, with_affinity::Bool)
     if model_family == "boltz2"
-        return with_affinity ?
-            joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors") :
-            joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors")
+        with_affinity && return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors")
+        return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors")
     end
     return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors")
 end
@@ -134,9 +133,9 @@ function main()
     Random.seed!(seed)
     println("Using seed: ", seed)
     model_family = parse_model_family(get(args, "model-family", "boltzgen1"))
+    with_affinity = get(args, "with-affinity", "false") == "true"
     with_confidence_default = model_family == "boltz2" ? "true" : "false"
     with_confidence = get(args, "with-confidence", with_confidence_default) == "true"
-    with_affinity = get(args, "with-affinity", "false") == "true"
     out_heads = get(args, "out-heads", "")
     target_path = get(args, "target", "")
     isempty(target_path) && error("Missing --target <path-to-pdb-or-cif>")
