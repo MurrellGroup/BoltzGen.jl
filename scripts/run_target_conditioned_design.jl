@@ -74,6 +74,21 @@ function parse_string_list(spec::AbstractString)
     return [String(strip(s)) for s in split(spec, ',') if !isempty(strip(s))]
 end
 
+function parse_model_family(spec::AbstractString)
+    fam = lowercase(strip(String(spec)))
+    fam in ("boltzgen1", "boltz2") || error("Unsupported --model-family '$spec' (expected boltzgen1 or boltz2)")
+    return fam
+end
+
+function default_weights_for_family(model_family::AbstractString, with_affinity::Bool)
+    if model_family == "boltz2"
+        return with_affinity ?
+            joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors") :
+            joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors")
+    end
+    return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors")
+end
+
 function design_tokens(args::Dict{String,String})
     chain_type = uppercase(get(args, "design-chain-type", "PROTEIN"))
     seq = get(args, "design-sequence", "")
@@ -118,7 +133,9 @@ function main()
     seed = haskey(args, "seed") ? parse(Int, args["seed"]) : 1
     Random.seed!(seed)
     println("Using seed: ", seed)
-    with_confidence = get(args, "with-confidence", "false") == "true"
+    model_family = parse_model_family(get(args, "model-family", "boltzgen1"))
+    with_confidence_default = model_family == "boltz2" ? "true" : "false"
+    with_confidence = get(args, "with-confidence", with_confidence_default) == "true"
     with_affinity = get(args, "with-affinity", "false") == "true"
     out_heads = get(args, "out-heads", "")
     target_path = get(args, "target", "")
@@ -197,7 +214,10 @@ function main()
         println("Warning: affinity enabled but affinity_token_mask is empty.")
     end
 
-    weights_path = get(args, "weights", joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"))
+    weights_path = get(args, "weights", default_weights_for_family(model_family, with_affinity))
+    if model_family == "boltz2" && any(design_mask)
+        error("Boltz2 mode is folding-only in this script; redesign masks/added design chains are not supported.")
+    end
     require_sampling_checkpoint!(weights_path; requires_design_conditioning=any(design_mask))
     steps = parse(Int, get(args, "steps", "100"))
     recycles = parse(Int, get(args, "recycles", "3"))

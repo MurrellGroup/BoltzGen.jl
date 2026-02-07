@@ -47,6 +47,11 @@ if !has_option(forwarded, "weights")
     push!(forwarded, default_weights)
 end
 
+if !has_option(forwarded, "model-family")
+    push!(forwarded, "--model-family")
+    push!(forwarded, "boltz2")
+end
+
 if !has_option(forwarded, "with-confidence")
     push!(forwarded, "--with-confidence")
     push!(forwarded, "true")

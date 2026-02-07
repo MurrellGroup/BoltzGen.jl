@@ -33,6 +33,12 @@ function require_sampling_checkpoint!(weights_path::AbstractString; requires_des
     end
 end
 
+function parse_model_family(spec::AbstractString)
+    fam = lowercase(strip(String(spec)))
+    fam in ("boltzgen1", "boltz2") || error("Unsupported model family '$spec' (expected boltzgen1 or boltz2)")
+    return fam
+end
+
 function main()
     token_len = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 13
     num_sampling_steps = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 100
@@ -41,6 +47,10 @@ function main()
     out_pdb37 = replace(out_pdb, ".pdb" => "_atom37.pdb")
     out_pdb37 == out_pdb && (out_pdb37 = out_pdb * "_atom37.pdb")
     weights_path = length(ARGS) >= 5 ? ARGS[5] : joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors")
+    model_family = length(ARGS) >= 10 ? parse_model_family(ARGS[10]) : "boltzgen1"
+    if model_family == "boltz2"
+        error("Boltz2 mode is folding-only and not supported by run_denovo_sample.jl.")
+    end
     require_sampling_checkpoint!(weights_path; requires_design_conditioning=true)
     with_confidence = length(ARGS) >= 6 ? (ARGS[6] == "1") : false
     with_affinity = length(ARGS) >= 7 ? (ARGS[7] == "1") : false

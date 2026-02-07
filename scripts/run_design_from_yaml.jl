@@ -38,6 +38,21 @@ function parse_string_list(spec::AbstractString)
     return [String(strip(s)) for s in split(spec, ',') if !isempty(strip(s))]
 end
 
+function parse_model_family(spec::AbstractString)
+    fam = lowercase(strip(String(spec)))
+    fam in ("boltzgen1", "boltz2") || error("Unsupported --model-family '$spec' (expected boltzgen1 or boltz2)")
+    return fam
+end
+
+function default_weights_for_family(model_family::AbstractString, with_affinity::Bool)
+    if model_family == "boltz2"
+        return with_affinity ?
+            joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors") :
+            joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors")
+    end
+    return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors")
+end
+
 function require_sampling_checkpoint!(weights_path::AbstractString; requires_design_conditioning::Bool=false)
     state = SafeTensors.load_safetensors(weights_path)
     has_token_transformer = any(startswith(k, "structure_module.score_model.token_transformer_layers.0.layers.") for k in keys(state)) ||
@@ -69,7 +84,9 @@ function main()
     Random.seed!(seed)
     println("Using seed: ", seed)
 
-    with_confidence = get(args, "with-confidence", "false") == "true"
+    model_family = parse_model_family(get(args, "model-family", "boltzgen1"))
+    with_confidence_default = model_family == "boltz2" ? "true" : "false"
+    with_confidence = get(args, "with-confidence", with_confidence_default) == "true"
     with_affinity = get(args, "with-affinity", "false") == "true"
     include_nonpolymer_default = "true"
     include_nonpolymer = get(args, "include-nonpolymer", include_nonpolymer_default) == "true"
@@ -78,7 +95,7 @@ function main()
     steps = parse(Int, get(args, "steps", "100"))
     recycles = parse(Int, get(args, "recycles", "3"))
 
-    weights_path = get(args, "weights", joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"))
+    weights_path = get(args, "weights", default_weights_for_family(model_family, with_affinity))
 
     stem = splitext(basename(yaml_path))[1]
     out_prefix_default = joinpath(WORKSPACE_ROOT, "boltzgen_cache", "generated_from_yaml_" * stem)
@@ -124,6 +141,10 @@ function main()
         falses(length(parsed.residue_tokens))
     end
     affinity_mw = haskey(args, "affinity-mw") ? Float32(parse(Float64, args["affinity-mw"])) : 0f0
+
+    if model_family == "boltz2" && any(parsed.design_mask)
+        error("Boltz2 mode is folding-only in this script; YAML specs with designed residues are not supported.")
+    end
 
     require_sampling_checkpoint!(weights_path; requires_design_conditioning=any(parsed.design_mask))
 
