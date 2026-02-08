@@ -1,7 +1,16 @@
 # Current Status: BoltzGen Julia Parser/Input Parity
 
+## Parity Semantics (Do Not Relax)
+- In this project, **"fail" means "did not exactly match Python features"**, even if execution completed without runtime errors.
+- A run that does not crash but has any feature mismatch is still a hard failure.
+- Success means exact parity on compared feature tensors/arrays, not merely "no exception".
+
 ## Purpose
 Port BoltzGen inference stack to Julia with parity against Python, including YAML-driven design/folding inputs. Current focus is parser/input parity (before full-model parity can be trusted).
+
+## Companion Status Doc
+- Feature-level working/incomplete matrix (including fold+small-molecule round-trip issue):
+  - `/Users/benmurrell/JuliaM3/BoltzGenJuliaPort/BoltzGen.jl/feature_status.md`
 
 ## Repos and Code Locations
 - Julia implementation repo (committable):
