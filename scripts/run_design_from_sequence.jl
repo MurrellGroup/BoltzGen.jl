@@ -121,14 +121,11 @@ function parse_model_family(spec::AbstractString)
 end
 
 function default_weights_for_family(model_family::AbstractString, with_affinity::Bool)
-    if model_family == "boltz2"
-        with_affinity && return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_aff_state_dict.safetensors")
-        return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltz2_conf_final_state_dict.safetensors")
-    end
-    return joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors")
+    return BoltzGen.default_weights_filename(model_family, with_affinity)
 end
 
-function require_sampling_checkpoint!(weights_path::AbstractString; requires_design_conditioning::Bool=false)
+function require_sampling_checkpoint!(weights_spec::AbstractString; requires_design_conditioning::Bool=false)
+    weights_path = BoltzGen.resolve_weights_path(weights_spec)
     state = SafeTensors.load_safetensors(weights_path)
     has_token_transformer = any(startswith(k, "structure_module.score_model.token_transformer_layers.0.layers.") for k in keys(state)) ||
         any(startswith(k, "structure_module.score_model.token_transformer.layers.") for k in keys(state))
@@ -147,6 +144,7 @@ function require_sampling_checkpoint!(weights_path::AbstractString; requires_des
             )
         end
     end
+    return weights_path
 end
 
 function main()
@@ -181,12 +179,13 @@ function main()
     T = length(residues)
     steps = parse(Int, get(args, "steps", "100"))
     recycles = parse(Int, get(args, "recycles", "3"))
+    println("[progress] case-ready: token spec built (tokens=", T, ", chain_type=", chain_type, ")")
 
     default_base = joinpath(WORKSPACE_ROOT, "boltzgen_cache", "generated_design_len$(T)_julia")
     out_pdb = get(args, "out-pdb", default_base * ".pdb")
     out_pdb37 = get(args, "out-pdb-atom37", default_base * "_atom37.pdb")
     out_cif = get(args, "out-cif", default_base * ".cif")
-    weights_path = get(args, "weights", default_weights_for_family(model_family, with_affinity))
+    weights_spec = get(args, "weights", default_weights_for_family(model_family, with_affinity))
 
     if model_family == "boltz2" && isempty(sequence)
         error("Boltz2 mode is folding-only here and requires --sequence (de novo --length mode is not supported).")
@@ -209,7 +208,7 @@ function main()
     if model_family == "boltz2" && any(design_mask)
         error("Boltz2 mode does not support design masking in this script. Use fold settings (fixed sequence).")
     end
-    require_sampling_checkpoint!(weights_path; requires_design_conditioning=any(design_mask))
+    weights_path = require_sampling_checkpoint!(weights_spec; requires_design_conditioning=any(design_mask))
 
     target_msa_mask = if haskey(args, "target-msa-mask")
         parse_index_set(args["target-msa-mask"], T)
@@ -245,6 +244,13 @@ function main()
     template_paths = parse_string_list(get(args, "template-paths", ""))
     template_max_count = haskey(args, "template-max-count") ? parse(Int, args["template-max-count"]) : nothing
     template_chains = haskey(args, "template-chains") ? parse_string_list(args["template-chains"]) : nothing
+    println(
+        "[progress] case-ready: optional inputs resolved (msa_file=",
+        (isempty(msa_file) ? "none" : msa_file),
+        ", templates=",
+        length(template_paths),
+        ")",
+    )
 
     model, _, missing = BoltzGen.load_model_from_safetensors(
         weights_path;
@@ -254,6 +260,7 @@ function main()
     if !isempty(missing)
         println("Unmapped state keys: ", length(missing))
     end
+    println("[progress] case-ready: model loaded (weights=", basename(weights_path), ")")
 
     feats = BoltzGen.build_design_features(
         residues;
@@ -275,6 +282,7 @@ function main()
     )
 
     feats_masked = BoltzGen.boltz_masker(feats; mask=true, mask_backbone=false)
+    println("[progress] sampling: starting diffusion (steps=", steps, ", recycles=", recycles, ")")
 
     out = BoltzGen.boltz_forward(
         model,

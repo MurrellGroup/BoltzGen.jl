@@ -39,7 +39,7 @@ function main()
     weights = get(
         args,
         "weights",
-        joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors"),
+        "boltzgen1_diverse_state_dict.safetensors",
     )
 
     out_prefix = joinpath(

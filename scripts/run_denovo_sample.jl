@@ -12,7 +12,8 @@ using .BoltzGen
 
 Onion.bg_set_training!(false)
 
-function require_sampling_checkpoint!(weights_path::AbstractString; requires_design_conditioning::Bool=false)
+function require_sampling_checkpoint!(weights_spec::AbstractString; requires_design_conditioning::Bool=false)
+    weights_path = BoltzGen.resolve_weights_path(weights_spec)
     state = SafeTensors.load_safetensors(weights_path)
     has_token_transformer = any(startswith(k, "structure_module.score_model.token_transformer_layers.0.layers.") for k in keys(state)) ||
         any(startswith(k, "structure_module.score_model.token_transformer.layers.") for k in keys(state))
@@ -31,6 +32,7 @@ function require_sampling_checkpoint!(weights_path::AbstractString; requires_des
             )
         end
     end
+    return weights_path
 end
 
 function parse_model_family(spec::AbstractString)
@@ -46,12 +48,12 @@ function main()
     out_pdb = length(ARGS) >= 4 ? ARGS[4] : joinpath(WORKSPACE_ROOT, "boltzgen_cache", "generated_denovo_len$(token_len)_julia.pdb")
     out_pdb37 = replace(out_pdb, ".pdb" => "_atom37.pdb")
     out_pdb37 == out_pdb && (out_pdb37 = out_pdb * "_atom37.pdb")
-    weights_path = length(ARGS) >= 5 ? ARGS[5] : joinpath(WORKSPACE_ROOT, "boltzgen_cache", "boltzgen1_diverse_state_dict.safetensors")
+    weights_spec = length(ARGS) >= 5 ? ARGS[5] : "boltzgen1_diverse_state_dict.safetensors"
     model_family = length(ARGS) >= 10 ? parse_model_family(ARGS[10]) : "boltzgen1"
     if model_family == "boltz2"
         error("Boltz2 mode is folding-only and not supported by run_denovo_sample.jl.")
     end
-    require_sampling_checkpoint!(weights_path; requires_design_conditioning=true)
+    weights_path = require_sampling_checkpoint!(weights_spec; requires_design_conditioning=true)
     with_confidence = length(ARGS) >= 6 ? (ARGS[6] == "1") : false
     with_affinity = length(ARGS) >= 7 ? (ARGS[7] == "1") : false
     out_heads = length(ARGS) >= 8 ? ARGS[8] : ""

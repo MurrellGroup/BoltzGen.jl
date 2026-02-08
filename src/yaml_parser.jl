@@ -266,6 +266,199 @@ function _atomize_smiles_ligand_tokens(
     return atoks, anames, acoords, parent_idx, abonds
 end
 
+function _atomize_ccd_ligand_tokens(
+    ccd_codes::Vector{String};
+    ccd_cache_path::Union{Nothing,AbstractString}=nothing,
+)
+    isempty(ccd_codes) && error("CCD ligand list is empty")
+
+    atoks = String[]
+    anames = Vector{Vector{String}}()
+    acoords = Vector{Dict{String,NTuple{3,Float32}}}()
+    parent_idx = Int[]
+    abonds = NTuple{3,Int}[]
+
+    for (res_idx, code_raw) in enumerate(ccd_codes)
+        code = _upper(code_raw)
+        entry = load_ccd_ligand_cache_entry(code; cache_path=ccd_cache_path)
+        names = entry.atom_names
+        coords = entry.atom_ref_coords
+        local_bonds = entry.bonds
+
+        n_atoms = length(names)
+        n_atoms > 0 || error("CCD '$code' has zero heavy atoms")
+        start_idx = length(atoks) + 1
+
+        for atom_name in names
+            haskey(coords, atom_name) || error("CCD '$code' missing coordinate for atom '$atom_name'")
+            push!(atoks, "UNK")
+            push!(anames, [atom_name])
+            push!(acoords, Dict{String,NTuple{3,Float32}}(atom_name => coords[atom_name]))
+            push!(parent_idx, res_idx)
+        end
+
+        for (i, j, bt) in local_bonds
+            1 <= i <= n_atoms || error("CCD '$code' local bond index out of range: i=$i n_atoms=$n_atoms")
+            1 <= j <= n_atoms || error("CCD '$code' local bond index out of range: j=$j n_atoms=$n_atoms")
+            i == j && error("CCD '$code' local self-bond at atom $i")
+            t1 = start_idx + i - 1
+            t2 = start_idx + j - 1
+            push!(abonds, (t1, t2, bt))
+        end
+    end
+
+    return atoks, anames, acoords, parent_idx, abonds
+end
+
+function _atomize_file_nonpolymer_tokens(
+    residue_tokens::Vector{String},
+    mol_types::Vector{Int},
+    asym_ids::Vector{Int},
+    entity_ids::Vector{Int},
+    sym_ids::Vector{Int},
+    residue_indices::Vector{Int},
+    chain_labels::Vector{String},
+    residue_comp_ids::Vector{String},
+    token_atom_names::Vector{Vector{String}},
+    token_atom_coords::Vector{Dict{String,NTuple{3,Float32}}},
+    token_atom_ref_coords::Vector{Dict{String,NTuple{3,Float32}}},
+    design_mask::AbstractVector{Bool},
+    binding_type::Vector{Int},
+    ss_type::Vector{Int},
+    structure_group::Vector{Int},
+    target_msa_mask::AbstractVector{Bool},
+    cyclic_period::Vector{Int},
+    msa_paths::Vector{Union{Nothing, String}},
+)
+    T = length(residue_tokens)
+    length(mol_types) == T || error("file atomization: mol_types length mismatch")
+    length(asym_ids) == T || error("file atomization: asym_ids length mismatch")
+    length(entity_ids) == T || error("file atomization: entity_ids length mismatch")
+    length(sym_ids) == T || error("file atomization: sym_ids length mismatch")
+    length(residue_indices) == T || error("file atomization: residue_indices length mismatch")
+    length(chain_labels) == T || error("file atomization: chain_labels length mismatch")
+    length(residue_comp_ids) == T || error("file atomization: residue_comp_ids length mismatch")
+    length(token_atom_names) == T || error("file atomization: token_atom_names length mismatch")
+    length(token_atom_coords) == T || error("file atomization: token_atom_coords length mismatch")
+    length(token_atom_ref_coords) == T || error("file atomization: token_atom_ref_coords length mismatch")
+    length(design_mask) == T || error("file atomization: design_mask length mismatch")
+    length(binding_type) == T || error("file atomization: binding_type length mismatch")
+    length(ss_type) == T || error("file atomization: ss_type length mismatch")
+    length(structure_group) == T || error("file atomization: structure_group length mismatch")
+    length(target_msa_mask) == T || error("file atomization: target_msa_mask length mismatch")
+    length(cyclic_period) == T || error("file atomization: cyclic_period length mismatch")
+    length(msa_paths) == T || error("file atomization: msa_paths length mismatch")
+
+    out_residue_tokens = String[]
+    out_mol_types = Int[]
+    out_asym_ids = Int[]
+    out_entity_ids = Int[]
+    out_sym_ids = Int[]
+    out_residue_indices = Int[]
+    out_chain_labels = String[]
+    out_residue_comp_ids = String[]
+    out_token_atom_names = Vector{Vector{String}}()
+    out_token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+    out_token_atom_ref_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+    out_design_mask = Bool[]
+    out_binding_type = Int[]
+    out_ss_type = Int[]
+    out_structure_group = Int[]
+    out_target_msa_mask = Bool[]
+    out_cyclic_period = Int[]
+    out_msa_paths = Vector{Union{Nothing, String}}()
+    out_source_token_indices = Int[]
+
+    chain_is_all_nonpoly = Dict{String,Bool}()
+    for c in chain_labels
+        chain_is_all_nonpoly[c] = true
+    end
+    for t in 1:T
+        c = chain_labels[t]
+        if mol_types[t] != chain_type_ids["NONPOLYMER"]
+            chain_is_all_nonpoly[c] = false
+        end
+    end
+
+    for t in 1:T
+        c = chain_labels[t]
+        atomize_token = mol_types[t] == chain_type_ids["NONPOLYMER"] && get(chain_is_all_nonpoly, c, false)
+        if atomize_token
+            comp = _upper(residue_comp_ids[t])
+            entry = load_ccd_ligand_cache_entry(comp)
+            names = entry.atom_names
+            coords = token_atom_coords[t]
+            ref_coords = entry.atom_ref_coords
+            isempty(names) && error("File NONPOLYMER token at index $t has zero atoms")
+            for atom_name in names
+                haskey(ref_coords, atom_name) || error("CCD '$comp' is missing reference coordinates for atom '$atom_name'")
+                atom_coord = get(coords, atom_name, (0f0, 0f0, 0f0))
+                push!(out_residue_tokens, residue_tokens[t])
+                push!(out_mol_types, mol_types[t])
+                push!(out_asym_ids, asym_ids[t])
+                push!(out_entity_ids, entity_ids[t])
+                push!(out_sym_ids, sym_ids[t])
+                push!(out_residue_indices, residue_indices[t])
+                push!(out_chain_labels, c)
+                push!(out_residue_comp_ids, residue_comp_ids[t])
+                push!(out_token_atom_names, [atom_name])
+                push!(out_token_atom_coords, Dict{String,NTuple{3,Float32}}(atom_name => atom_coord))
+                push!(out_token_atom_ref_coords, Dict{String,NTuple{3,Float32}}(atom_name => ref_coords[atom_name]))
+                push!(out_design_mask, design_mask[t])
+                push!(out_binding_type, binding_type[t])
+                push!(out_ss_type, ss_type[t])
+                push!(out_structure_group, structure_group[t])
+                push!(out_target_msa_mask, target_msa_mask[t])
+                push!(out_cyclic_period, cyclic_period[t])
+                push!(out_msa_paths, msa_paths[t])
+                push!(out_source_token_indices, t)
+            end
+        else
+            push!(out_residue_tokens, residue_tokens[t])
+            push!(out_mol_types, mol_types[t])
+            push!(out_asym_ids, asym_ids[t])
+            push!(out_entity_ids, entity_ids[t])
+            push!(out_sym_ids, sym_ids[t])
+            push!(out_residue_indices, residue_indices[t])
+            push!(out_chain_labels, c)
+            push!(out_residue_comp_ids, residue_comp_ids[t])
+            push!(out_token_atom_names, token_atom_names[t])
+            push!(out_token_atom_coords, token_atom_coords[t])
+            push!(out_token_atom_ref_coords, token_atom_ref_coords[t])
+            push!(out_design_mask, design_mask[t])
+            push!(out_binding_type, binding_type[t])
+            push!(out_ss_type, ss_type[t])
+            push!(out_structure_group, structure_group[t])
+            push!(out_target_msa_mask, target_msa_mask[t])
+            push!(out_cyclic_period, cyclic_period[t])
+            push!(out_msa_paths, msa_paths[t])
+            push!(out_source_token_indices, t)
+        end
+    end
+
+    return (
+        residue_tokens=out_residue_tokens,
+        mol_types=out_mol_types,
+        asym_ids=out_asym_ids,
+        entity_ids=out_entity_ids,
+        sym_ids=out_sym_ids,
+        residue_indices=out_residue_indices,
+        chain_labels=out_chain_labels,
+        residue_comp_ids=out_residue_comp_ids,
+        token_atom_names=out_token_atom_names,
+        token_atom_coords=out_token_atom_coords,
+        token_atom_ref_coords=out_token_atom_ref_coords,
+        design_mask=out_design_mask,
+        binding_type=out_binding_type,
+        ss_type=out_ss_type,
+        structure_group=out_structure_group,
+        target_msa_mask=out_target_msa_mask,
+        cyclic_period=out_cyclic_period,
+        msa_paths=out_msa_paths,
+        source_token_indices=out_source_token_indices,
+    )
+end
+
 function _token_to_msa_char(tok::AbstractString, mol_type_id::Int)
     t = uppercase(strip(String(tok)))
     if t == "-"
@@ -490,8 +683,10 @@ function _insert_token!(
     sym_ids::Vector{Int},
     residue_indices::Vector{Int},
     chain_labels::Vector{String},
+    residue_comp_ids::Vector{String},
     token_atom_names::Vector{Vector{String}},
     token_atom_coords::Vector{Dict{String,NTuple{3,Float32}}},
+    token_atom_ref_coords::Vector{Dict{String,NTuple{3,Float32}}},
     design_mask::AbstractVector{Bool},
     binding_type::Vector{Int},
     ss_type::Vector{Int},
@@ -509,8 +704,10 @@ function _insert_token!(
     insert!(sym_ids, idx, sym)
     insert!(residue_indices, idx, res_idx)
     insert!(chain_labels, idx, chain)
+    insert!(residue_comp_ids, idx, tok)
     insert!(token_atom_names, idx, String[])
     insert!(token_atom_coords, idx, Dict{String,NTuple{3,Float32}}())
+    insert!(token_atom_ref_coords, idx, Dict{String,NTuple{3,Float32}}())
 
     insert!(include_mask, idx, true)
     insert!(design_mask, idx, true)
@@ -537,8 +734,24 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     end
     residue_indices = copy(parsed.residue_indices)
     chain_labels = copy(parsed.chain_labels)
+    residue_comp_ids = copy(parsed.comp_ids)
     token_atom_names = copy(parsed.token_atom_names)
     token_atom_coords = copy(parsed.token_atom_coords)
+    token_atom_ref_coords = [
+        parsed.mol_types[i] == chain_type_ids["NONPOLYMER"] ? copy(parsed.token_atom_coords[i]) : Dict{String,NTuple{3,Float32}}()
+        for i in eachindex(parsed.token_atom_coords)
+    ]
+    for i in eachindex(residue_tokens)
+        if mol_types[i] == chain_type_ids["NONPOLYMER"]
+            continue
+        end
+        if isempty(token_atom_names[i]) && isempty(token_atom_coords[i])
+            tok = residue_tokens[i]
+            if haskey(ref_atoms, tok)
+                token_atom_names[i] = copy(ref_atoms[tok])
+            end
+        end
+    end
     target_msa_mask = fill(_as_boolish(_ydict_get(spec, "msa", false), false), length(residue_tokens))
     cyclic_period = zeros(Int, length(residue_tokens))
     default_msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), spec_base, rng, sampling_state)
@@ -546,18 +759,75 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     for c in unique(chain_labels)
         chain_msa_paths[c] = default_msa_path
     end
+    file_token_bonds = copy(parsed.token_bonds)
 
     n = length(residue_tokens)
     include_mask = trues(n)
 
-    chain_global_idxs(chain_id::AbstractString, res_spec=nothing) = begin
+    function _shift_bonds_for_insert!(bonds::Vector{NTuple{3, Int}}, idx::Int)
+        for k in eachindex(bonds)
+            i, j, bt = bonds[k]
+            ni = i >= idx ? i + 1 : i
+            nj = j >= idx ? j + 1 : j
+            a, b = ni < nj ? (ni, nj) : (nj, ni)
+            bonds[k] = (a, b, bt)
+        end
+    end
+
+    function chain_global_idxs(chain_id::AbstractString, res_spec=nothing)
         idxs = findall(==(string(chain_id)), chain_labels)
         isempty(idxs) && error("Chain $(chain_id) not found in file entity: $(path)")
         if res_spec === nothing
             return idxs
         end
-        local_idxs = _parse_index_spec(res_spec, length(idxs))
-        return [idxs[i] for i in local_idxs]
+
+        s = strip(string(res_spec))
+        isempty(s) && return idxs
+        lowercase(s) == "all" && return idxs
+
+        vals = residue_indices[idxs]  # 0-based chain residue indices from structure parser
+        chain_len = isempty(vals) ? 0 : (maximum(vals) + 1)
+        chain_len > 0 || return Int[]
+        selected = falses(length(idxs))
+
+        function _parse_pos_1based(raw::AbstractString)
+            v = parse(Int, strip(raw))
+            v >= 1 || error("There is a 0 in the specified range(s) $(res_spec). Residue indices are 1 indexed.")
+            v <= chain_len || error("Specified end $(res_spec) is higher than the length of the chain.")
+            return v
+        end
+
+        for part0 in split(s, ',')
+            part = strip(part0)
+            isempty(part) && continue
+
+            if occursin("..", part)
+                if startswith(part, "..")
+                    hi1 = _parse_pos_1based(part[3:end])
+                    hi0 = hi1 - 1
+                    selected .|= vals .<= hi0
+                elseif endswith(part, "..")
+                    lo1 = _parse_pos_1based(part[1:end-2])
+                    lo0 = lo1 - 1
+                    selected .|= vals .>= lo0
+                else
+                    bits = split(part, "..")
+                    length(bits) == 2 || error("Invalid residue range spec: $(part)")
+                    lo1 = _parse_pos_1based(bits[1])
+                    hi1 = _parse_pos_1based(bits[2])
+                    lo1 <= hi1 || error("Invalid decreasing residue range spec: $(part)")
+                    lo0 = lo1 - 1
+                    hi0 = hi1 - 1
+                    selected .|= (vals .>= lo0) .& (vals .<= hi0)
+                end
+            else
+                pos1 = _parse_pos_1based(part)
+                pos0 = pos1 - 1
+                selected .|= vals .== pos0
+            end
+        end
+
+        return [idxs[i] for i in eachindex(idxs) if selected[i]]
     end
 
     include_spec = _ydict_get(spec, "include", "all")
@@ -620,6 +890,29 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             cid === nothing && error("Missing chain.id in exclude")
             ridx = _ydict_get(c, "res_index", nothing)
             include_mask[chain_global_idxs(string(cid), ridx)] .= false
+        end
+    end
+
+    # Remove leading/trailing unresolved residues from the included region of
+    # each chain (python schema parser behavior).
+    is_present = [!isempty(token_atom_coords[i]) for i in 1:n]
+    for c in unique(chain_labels)
+        idxs = findall(==(c), chain_labels)
+        isempty(idxs) && continue
+        included = [idx for idx in idxs if include_mask[idx]]
+        isempty(included) && continue
+        present_flags = is_present[included]
+        first_true = findfirst(==(true), present_flags)
+        last_true = findlast(==(true), present_flags)
+        if first_true === nothing || last_true === nothing
+            include_mask[included] .= false
+            continue
+        end
+        for k in 1:(first_true - 1)
+            include_mask[included[k]] = false
+        end
+        for k in (last_true + 1):length(included)
+            include_mask[included[k]] = false
         end
     end
 
@@ -695,7 +988,9 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             gid = _ydict_get(gr, "id", nothing)
             gid === nothing && error("Missing group.id in structure_groups")
             if string(gid) == "all"
-                g .= vis
+                # Match python schema parser behavior: "all" forces visibility=1,
+                # regardless of the provided visibility value.
+                g .= 1
             else
                 ridx = _ydict_get(gr, "res_index", nothing)
                 g[chain_global_idxs(string(gid), ridx)] .= vis
@@ -765,6 +1060,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             resv = residue_indices[chain_idxs[min(ins_pos, length(chain_idxs))]]
 
             for j in 0:(nins - 1)
+                _shift_bonds_for_insert!(file_token_bonds, gidx + j)
                 _insert_token!(
                     gidx + j,
                     tok,
@@ -782,8 +1078,10 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
                     sym_ids,
                     residue_indices,
                     chain_labels,
+                    residue_comp_ids,
                     token_atom_names,
                     token_atom_coords,
+                    token_atom_ref_coords,
                     design_mask,
                     binding_type,
                     ss_type,
@@ -798,6 +1096,30 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     end
 
     keep = findall(include_mask)
+    n_cur = length(include_mask)
+    old_to_new = zeros(Int, n_cur)
+    for (new_idx, old_idx) in enumerate(keep)
+        old_to_new[old_idx] = new_idx
+    end
+    mapped_file_bonds = NTuple{3, Int}[]
+    seen_file_bonds = Set{NTuple{3, Int}}()
+    for (i, j, bt) in file_token_bonds
+        1 <= i <= n_cur || continue
+        1 <= j <= n_cur || continue
+        ni = old_to_new[i]
+        nj = old_to_new[j]
+        ni == 0 && continue
+        nj == 0 && continue
+        ni == nj && continue
+        a, b = ni < nj ? (ni, nj) : (nj, ni)
+        bond = (a, b, bt)
+        if !(bond in seen_file_bonds)
+            push!(seen_file_bonds, bond)
+            push!(mapped_file_bonds, bond)
+        end
+    end
+    file_token_bonds = mapped_file_bonds
+
     residue_tokens = residue_tokens[keep]
     mol_types = mol_types[keep]
     asym_ids = asym_ids[keep]
@@ -805,14 +1127,33 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     sym_ids = sym_ids[keep]
     residue_indices = residue_indices[keep]
     chain_labels = chain_labels[keep]
+    residue_comp_ids = residue_comp_ids[keep]
     token_atom_names = token_atom_names[keep]
     token_atom_coords = token_atom_coords[keep]
+    token_atom_ref_coords = token_atom_ref_coords[keep]
     design_mask = design_mask[keep]
     binding_type = binding_type[keep]
     ss_type = ss_type[keep]
     structure_group = structure_group[keep]
     target_msa_mask = target_msa_mask[keep]
     cyclic_period = cyclic_period[keep]
+
+    # Match python parser behavior after include/exclude/proximity filtering:
+    # asym IDs are reassigned in kept-chain order.
+    chain_to_asym = Dict{String, Int}()
+    next_asym = 0
+    for i in eachindex(chain_labels)
+        c = chain_labels[i]
+        if !haskey(chain_to_asym, c)
+            chain_to_asym[c] = next_asym
+            next_asym += 1
+        end
+        asym_ids[i] = chain_to_asym[c]
+    end
+    if sym_group_override === nothing
+        sym_ids .= asym_ids
+    end
+
     msa_paths = Union{Nothing, String}[get(chain_msa_paths, chain_labels[i], nothing) for i in eachindex(chain_labels)]
 
     reset_spec = _ydict_get(spec, "reset_res_index", nothing)
@@ -823,7 +1164,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
             cid === nothing && error("Missing chain.id in reset_res_index")
             idxs = findall(==(string(cid)), chain_labels)
             for (k, idx) in enumerate(idxs)
-                residue_indices[idx] = k
+                residue_indices[idx] = k - 1
             end
         end
     end
@@ -843,6 +1184,69 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
         end
     end
 
+    atomized = _atomize_file_nonpolymer_tokens(
+        residue_tokens,
+        mol_types,
+        asym_ids,
+        entity_ids,
+        sym_ids,
+        residue_indices,
+        chain_labels,
+        residue_comp_ids,
+        token_atom_names,
+        token_atom_coords,
+        token_atom_ref_coords,
+        design_mask,
+        binding_type,
+        ss_type,
+        structure_group,
+        target_msa_mask,
+        cyclic_period,
+        msa_paths,
+    )
+    residue_tokens = atomized.residue_tokens
+    mol_types = atomized.mol_types
+    asym_ids = atomized.asym_ids
+    entity_ids = atomized.entity_ids
+    sym_ids = atomized.sym_ids
+    residue_indices = atomized.residue_indices
+    chain_labels = atomized.chain_labels
+    residue_comp_ids = atomized.residue_comp_ids
+    token_atom_names = atomized.token_atom_names
+    token_atom_coords = atomized.token_atom_coords
+    token_atom_ref_coords = atomized.token_atom_ref_coords
+    design_mask = atomized.design_mask
+    binding_type = atomized.binding_type
+    ss_type = atomized.ss_type
+    structure_group = atomized.structure_group
+    target_msa_mask = atomized.target_msa_mask
+    cyclic_period = atomized.cyclic_period
+    msa_paths = atomized.msa_paths
+    source_token_indices = atomized.source_token_indices
+
+    source_to_rep = Dict{Int, Int}()
+    for (new_idx, src_idx) in enumerate(source_token_indices)
+        if !haskey(source_to_rep, src_idx)
+            source_to_rep[src_idx] = new_idx
+        end
+    end
+    remapped_bonds = NTuple{3, Int}[]
+    seen_remapped = Set{NTuple{3, Int}}()
+    for (i, j, bt) in file_token_bonds
+        haskey(source_to_rep, i) || continue
+        haskey(source_to_rep, j) || continue
+        ni = source_to_rep[i]
+        nj = source_to_rep[j]
+        ni == nj && continue
+        a, b = ni < nj ? (ni, nj) : (nj, ni)
+        bond = (a, b, bt)
+        if !(bond in seen_remapped)
+            push!(seen_remapped, bond)
+            push!(remapped_bonds, bond)
+        end
+    end
+    file_token_bonds = remapped_bonds
+
     return (
         residue_tokens=residue_tokens,
         mol_types=mol_types,
@@ -853,6 +1257,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
         chain_labels=chain_labels,
         token_atom_names=token_atom_names,
         token_atom_coords=token_atom_coords,
+        token_atom_ref_coords=token_atom_ref_coords,
         design_mask=design_mask,
         binding_type=binding_type,
         ss_type=ss_type,
@@ -860,6 +1265,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
         target_msa_mask=target_msa_mask,
         cyclic_period=cyclic_period,
         msa_paths=msa_paths,
+        bonds=file_token_bonds,
     )
 end
 
@@ -937,6 +1343,7 @@ end
 function parse_design_yaml(
     yaml_path::AbstractString;
     include_nonpolymer::Bool=true,
+    ccd_cache_path::Union{Nothing,AbstractString}=nothing,
     rng::AbstractRNG=Random.default_rng(),
     sampling_plan=nothing,
     max_total_len_trials::Int=128,
@@ -1000,6 +1407,7 @@ function parse_design_yaml(
                 ent_residue_tokens,
                 ent_mol_types,
                 ent_residue_indices,
+                ent_entity_ids,
                 ent_chain_labels,
                 ent_token_atom_names,
                 ent_token_atom_coords,
@@ -1017,6 +1425,7 @@ function parse_design_yaml(
                 fuse_target::Union{Nothing,String}=nothing,
             )
                 length(ent_residue_tokens) == length(ent_mol_types) || error("append_entity!: token/molecule length mismatch")
+                length(ent_residue_tokens) == length(ent_entity_ids) || error("append_entity!: token/entity length mismatch")
                 length(ent_residue_tokens) == length(ent_chain_labels) || error("append_entity!: token/chain length mismatch")
                 local_chain_map = Dict{String, String}()
                 if fuse_target === nothing
@@ -1035,8 +1444,11 @@ function parse_design_yaml(
 
                 local_asym_map = Dict{String, Int}()
                 if fuse_target === nothing
-                    for cname in values(local_chain_map)
-                        local_asym_map[cname] = length(local_asym_map)
+                    for cname in orig_chain_names
+                        mapped = local_chain_map[cname]
+                        if !haskey(local_asym_map, mapped)
+                            local_asym_map[mapped] = length(local_asym_map)
+                        end
                     end
                 end
 
@@ -1046,7 +1458,7 @@ function parse_design_yaml(
                     0
                 end
                 ent_id_base = if fuse_target === nothing
-                    next_asym_base
+                    isempty(entity_ids) ? 0 : (maximum(entity_ids) + 1)
                 else
                     0
                 end
@@ -1064,7 +1476,7 @@ function parse_design_yaml(
                     if fuse_target === nothing
                         a_local = local_asym_map[c_eff]
                         a_global = next_asym_base + a_local
-                        ent_global = ent_id_base + a_local
+                        ent_global = ent_id_base + ent_entity_ids[i]
                         sym_global = ent_sym_ids[i]
                     else
                         if !haskey(fused_chain_meta, c_eff)
@@ -1111,6 +1523,7 @@ function parse_design_yaml(
             end
 
             entities = _as_list(_ydict_get(schema, "entities", Any[]))
+            seen_file_entity = false
             for e in entities
                 if _ydict_get(e, "protein", nothing) !== nothing || _ydict_get(e, "dna", nothing) !== nothing || _ydict_get(e, "rna", nothing) !== nothing
                     chain_type = _ydict_get(e, "protein", nothing) !== nothing ? "PROTEIN" : (_ydict_get(e, "dna", nothing) !== nothing ? "DNA" : "RNA")
@@ -1125,7 +1538,7 @@ function parse_design_yaml(
                     msa_flag = _as_boolish(_ydict_get(spec, "msa", false), false)
                     msa_path = _resolve_msa_setting(_ydict_get(spec, "msa", nothing), base_dir, rng, sampling_state)
                     cyclic_flag = _as_boolish(_ydict_get(spec, "cyclic", false), false)
-                    cyclic_val = cyclic_flag ? n : 0
+                    cyclic_val = (cyclic_flag && !seen_file_entity) ? n : 0
                     fuse_target = _ydict_get(spec, "fuse", nothing)
                     btype = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), n)
                     sstype = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), n)
@@ -1133,6 +1546,7 @@ function parse_design_yaml(
                     ent_residue_tokens = String[]
                     ent_mol_types = Int[]
                     ent_residue_indices = Int[]
+                    ent_entity_ids = Int[]
                     ent_chain_labels = String[]
                     ent_token_atom_names = Vector{Vector{String}}()
                     ent_token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
@@ -1150,9 +1564,11 @@ function parse_design_yaml(
                     mt = chain_type_ids[chain_type]
                     for id_any in ids
                         cid = string(id_any)
+                        offset = length(ent_residue_tokens)
                         append!(ent_residue_tokens, toks)
                         append!(ent_mol_types, fill(mt, n))
-                        append!(ent_residue_indices, collect(1:n))
+                        append!(ent_residue_indices, collect(0:n-1))
+                        append!(ent_entity_ids, fill(0, n))
                         append!(ent_chain_labels, fill(cid, n))
                         append!(ent_token_atom_names, [String[] for _ in 1:n])
                         append!(ent_token_atom_coords, [Dict{String,NTuple{3,Float32}}() for _ in 1:n])
@@ -1165,12 +1581,17 @@ function parse_design_yaml(
                         append!(ent_cyclic_period, fill(cyclic_val, n))
                         append!(ent_msa_paths, fill(msa_path, n))
                         append!(ent_sym_ids, fill(sym_group, n))
+                        if cyclic_flag && n > 1
+                            cov_bt = get(bond_type_ids, "COVALENT", 1) + 1
+                            push!(ent_bonds, (offset + 1, offset + n, cov_bt))
+                        end
                     end
 
                     append_entity!(
                         ent_residue_tokens,
                         ent_mol_types,
                         ent_residue_indices,
+                        ent_entity_ids,
                         ent_chain_labels,
                         ent_token_atom_names,
                         ent_token_atom_coords,
@@ -1214,13 +1635,15 @@ function parse_design_yaml(
                         sstype = [sstype_raw[i] for i in atomized_parent_idx]
                         residue_indices_src = [i - 1 for i in atomized_parent_idx]
                     elseif ccd !== nothing
-                        ccds = _as_list(ccd)
-                        toks = [haskey(token_ids, _upper(x)) ? _upper(x) : "UNK" for x in ccds]
-                        atom_names_src = [String[] for _ in 1:length(toks)]
-                        atom_coords_src = [Dict{String,NTuple{3,Float32}}() for _ in 1:length(toks)]
-                        btype = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), length(toks))
-                        sstype = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), length(toks))
-                        residue_indices_src = collect(0:length(toks)-1)
+                        ccds_raw = [String(strip(string(x))) for x in _as_list(ccd)]
+                        isempty(ccds_raw) && error("Ligand CCD list is empty")
+                        btype_raw = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), length(ccds_raw))
+                        sstype_raw = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), length(ccds_raw))
+                        toks, atom_names_src, atom_coords_src, atomized_parent_idx, ligand_internal_bonds_local =
+                            _atomize_ccd_ligand_tokens(ccds_raw; ccd_cache_path=ccd_cache_path)
+                        btype = [btype_raw[i] for i in atomized_parent_idx]
+                        sstype = [sstype_raw[i] for i in atomized_parent_idx]
+                        residue_indices_src = [i - 1 for i in atomized_parent_idx]
                     else
                         error("Ligand entity requires either 'smiles' or 'ccd'")
                     end
@@ -1233,6 +1656,7 @@ function parse_design_yaml(
                     ent_residue_tokens = String[]
                     ent_mol_types = Int[]
                     ent_residue_indices = Int[]
+                    ent_entity_ids = Int[]
                     ent_chain_labels = String[]
                     ent_token_atom_names = Vector{Vector{String}}()
                     ent_token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
@@ -1254,6 +1678,7 @@ function parse_design_yaml(
                         append!(ent_residue_tokens, toks)
                         append!(ent_mol_types, fill(mt, n))
                         append!(ent_residue_indices, residue_indices_src)
+                        append!(ent_entity_ids, fill(0, n))
                         append!(ent_chain_labels, fill(cid, n))
                         append!(ent_token_atom_names, [copy(atom_names_src[i]) for i in 1:n])
                         append!(ent_token_atom_coords, [Dict{String,NTuple{3,Float32}}(nm => (0f0, 0f0, 0f0) for nm in atom_names_src[i]) for i in 1:n])
@@ -1275,6 +1700,7 @@ function parse_design_yaml(
                         ent_residue_tokens,
                         ent_mol_types,
                         ent_residue_indices,
+                        ent_entity_ids,
                         ent_chain_labels,
                         ent_token_atom_names,
                         ent_token_atom_coords,
@@ -1297,16 +1723,18 @@ function parse_design_yaml(
                     parsed_file = _parse_file_entity(spec, base_dir, include_nonpolymer, rng, sampling_state)
                     orig_chain_names = unique(parsed_file.chain_labels)
                     fuse_target = _ydict_get(spec, "fuse", nothing)
-                    ent_bonds = NTuple{3,Int}[]
+                    ent_bonds = copy(parsed_file.bonds)
+                    seen_file_entity = true
 
                     append_entity!(
                         parsed_file.residue_tokens,
                         parsed_file.mol_types,
                         parsed_file.residue_indices,
+                        parsed_file.entity_ids,
                         parsed_file.chain_labels,
                         parsed_file.token_atom_names,
                         parsed_file.token_atom_coords,
-                        parsed_file.token_atom_coords,
+                        parsed_file.token_atom_ref_coords,
                         parsed_file.design_mask,
                         parsed_file.binding_type,
                         parsed_file.ss_type,
@@ -1341,6 +1769,68 @@ function parse_design_yaml(
                 push!(token_idxs_by_chain[c], i)
             end
 
+            token_groups_by_chain = Dict{String, Vector{Vector{Int}}}()
+            for (c, idxs) in token_idxs_by_chain
+                groups = Vector{Vector{Int}}()
+                for idx in idxs
+                    if isempty(groups)
+                        push!(groups, [idx])
+                        continue
+                    end
+                    prev = groups[end][end]
+                    same_nonpoly_residue = mol_types[idx] == chain_type_ids["NONPOLYMER"] &&
+                        mol_types[prev] == chain_type_ids["NONPOLYMER"] &&
+                        residue_indices[idx] == residue_indices[prev]
+                    if same_nonpoly_residue
+                        push!(groups[end], idx)
+                    else
+                        push!(groups, [idx])
+                    end
+                end
+                token_groups_by_chain[c] = groups
+            end
+
+            function resolve_constraint_token_idx(chain_id::String, res_idx_1based::Int, atom_name_raw)
+                haskey(token_groups_by_chain, chain_id) || error("Constraint chain not found: $chain_id")
+                groups = token_groups_by_chain[chain_id]
+                1 <= res_idx_1based <= length(groups) || error("Constraint residue index out of range for chain $chain_id: $res_idx_1based")
+                group = groups[res_idx_1based]
+                isempty(group) && error("Constraint resolved empty residue-token group for chain $chain_id residue $res_idx_1based")
+
+                if atom_name_raw === nothing
+                    length(group) == 1 || error(
+                        "Constraint on chain $chain_id residue $res_idx_1based is ambiguous across $(length(group)) atomized NONPOLYMER tokens; atom name is required",
+                    )
+                    return group[1]
+                end
+
+                atom_name = uppercase(strip(string(atom_name_raw)))
+                isempty(atom_name) && error("Constraint atom name is empty for chain $chain_id residue $res_idx_1based")
+                if length(group) == 1
+                    t = group[1]
+                    names = token_atom_names[t]
+                    if !isempty(names)
+                        any(n -> uppercase(strip(n)) == atom_name, names) || error(
+                            "Constraint atom '$atom_name' not found in chain $chain_id residue $res_idx_1based",
+                        )
+                    end
+                    return t
+                end
+
+                matches = Int[]
+                for t in group
+                    names = token_atom_names[t]
+                    if isempty(names)
+                        continue
+                    end
+                    any(n -> uppercase(strip(n)) == atom_name, names) && push!(matches, t)
+                end
+                length(matches) == 1 || error(
+                    "Constraint atom '$atom_name' for chain $chain_id residue $res_idx_1based resolved to $(length(matches)) tokens (expected 1)",
+                )
+                return matches[1]
+            end
+
             function add_bond_constraint!(b)
                 a1 = _as_list(_ydict_get(b, "atom1", nothing))
                 a2 = _as_list(_ydict_get(b, "atom2", nothing))
@@ -1351,16 +1841,11 @@ function parse_design_yaml(
                 c2 = _resolve_constraint_chain(string(a2[1]), chain_aliases)
                 r1 = Int(a1[2])
                 r2 = Int(a2[2])
+                atom_name_1 = length(a1) >= 3 ? a1[3] : nothing
+                atom_name_2 = length(a2) >= 3 ? a2[3] : nothing
 
-                haskey(token_idxs_by_chain, c1) || error("Constraint chain not found: $c1")
-                haskey(token_idxs_by_chain, c2) || error("Constraint chain not found: $c2")
-                idxs1 = token_idxs_by_chain[c1]
-                idxs2 = token_idxs_by_chain[c2]
-                1 <= r1 <= length(idxs1) || error("Constraint residue index out of range for chain $c1: $r1")
-                1 <= r2 <= length(idxs2) || error("Constraint residue index out of range for chain $c2: $r2")
-
-                t1 = idxs1[r1]
-                t2 = idxs2[r2]
+                t1 = resolve_constraint_token_idx(c1, r1, atom_name_1)
+                t2 = resolve_constraint_token_idx(c2, r2, atom_name_2)
                 bt_name = _upper(_ydict_get(b, "bondtype", "COVALENT"))
                 bt_id = get(bond_type_ids, bt_name, get(bond_type_ids, "COVALENT", 1)) + 1
                 push!(bonds, (t1, t2, bt_id))

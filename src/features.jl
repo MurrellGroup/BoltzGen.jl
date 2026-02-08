@@ -491,8 +491,10 @@ function build_design_features(
             token_atom_coords_override === nothing && error("NONPOLYMER token at index $t requires token_atom_coords_override")
             isempty(token_atom_names_override[t]) && error("NONPOLYMER token at index $t has empty atom-name override")
         end
+        tok_has_ref_atoms = haskey(ref_atoms, tok)
         use_override_atoms = token_atom_names_override !== nothing &&
             !isempty(token_atom_names_override[t]) &&
+            (is_nonpoly || tok == "UNK" || !tok_has_ref_atoms) &&
             !(force_atom14_for_designed_protein && design_mask_v[t] && mol_types_v[t] == chain_type_ids["PROTEIN"])
         atoms = if use_override_atoms
             copy(token_atom_names_override[t])
@@ -701,6 +703,18 @@ function build_design_features(
             atom_coord_override = token_atom_coords_override === nothing ? nothing : token_atom_coords_override[t]
             atom_ref_coord_override = token_atom_ref_coords_override === nothing ? atom_coord_override : token_atom_ref_coords_override[t]
             is_nonpoly = mol_types_v[t] == chain_type_ids["NONPOLYMER"]
+            has_atom_name_override = token_atom_names_override !== nothing && !isempty(token_atom_names_override[t])
+            coord_override_active = atom_coord_override !== nothing && (!isempty(atom_coord_override) || has_atom_name_override)
+            ref_coord_override_active = atom_ref_coord_override !== nothing && !isempty(atom_ref_coord_override)
+            ca_ref_xyz = nothing
+            if ref_coord_override_active && haskey(atom_ref_coord_override, "CA")
+                ca_ref_xyz = atom_ref_coord_override["CA"]
+            elseif haskey(ref_atom_pos, tok)
+                tok_ref_pos = ref_atom_pos[tok]
+                if haskey(tok_ref_pos, "CA")
+                    ca_ref_xyz = tok_ref_pos["CA"]
+                end
+            end
 
             for (j, atom_name) in enumerate(atoms)
                 m = offset + j - 1
@@ -709,20 +723,49 @@ function build_design_features(
                 end
 
                 atom_pad_mask[m, b] = 1f0
-                atom_resolved_mask[m, b] = 1f0
+                has_coord_override = false
+                coord_xyz = (0f0, 0f0, 0f0)
+                if coord_override_active
+                    if haskey(atom_coord_override, atom_name)
+                        has_coord_override = true
+                        coord_xyz = atom_coord_override[atom_name]
+                    elseif tok == "MET" && atom_name == "SD" && haskey(atom_coord_override, "SE")
+                        has_coord_override = true
+                        coord_xyz = atom_coord_override["SE"]
+                    end
+                end
+
+                has_ref_coord_override = false
+                ref_xyz = (0f0, 0f0, 0f0)
+                if ref_coord_override_active
+                    if haskey(atom_ref_coord_override, atom_name)
+                        has_ref_coord_override = true
+                        ref_xyz = atom_ref_coord_override[atom_name]
+                    elseif tok == "MET" && atom_name == "SD" && haskey(atom_ref_coord_override, "SE")
+                        has_ref_coord_override = true
+                        ref_xyz = atom_ref_coord_override["SE"]
+                    end
+                end
+                if !has_ref_coord_override && startswith(atom_name, "LV") && ca_ref_xyz !== nothing
+                    has_ref_coord_override = true
+                    ref_xyz = ca_ref_xyz
+                end
+
+                atom_present = if is_nonpoly
+                    has_coord_override
+                elseif coord_override_active
+                    has_coord_override
+                else
+                    true
+                end
+                atom_resolved_mask[m, b] = atom_present ? 1f0 : 0f0
                 atom_to_token[m, t, b] = 1f0
                 ref_space_uid[m, b] = token_space_uid[t]
                 ref_atom_name_chars[:, :, m, b] .= encode_atom_name_chars(atom_name)
-                if atom_ref_coord_override !== nothing && haskey(atom_ref_coord_override, atom_name)
-                    xyz = atom_ref_coord_override[atom_name]
-                    ref_pos[1, m, b] = xyz[1]
-                    ref_pos[2, m, b] = xyz[2]
-                    ref_pos[3, m, b] = xyz[3]
-                elseif atom_coord_override !== nothing && haskey(atom_coord_override, atom_name)
-                    xyz = atom_coord_override[atom_name]
-                    ref_pos[1, m, b] = xyz[1]
-                    ref_pos[2, m, b] = xyz[2]
-                    ref_pos[3, m, b] = xyz[3]
+                if has_ref_coord_override
+                    ref_pos[1, m, b] = ref_xyz[1]
+                    ref_pos[2, m, b] = ref_xyz[2]
+                    ref_pos[3, m, b] = ref_xyz[3]
                 elseif is_nonpoly
                     error("Missing reference coordinate override for NONPOLYMER atom '$atom_name' at token index $t")
                 elseif haskey(ref_atom_pos, tok)
@@ -733,12 +776,15 @@ function build_design_features(
                         ref_pos[2, m, b] = xyz[2]
                         ref_pos[3, m, b] = xyz[3]
                     end
+                elseif has_coord_override
+                    ref_pos[1, m, b] = coord_xyz[1]
+                    ref_pos[2, m, b] = coord_xyz[2]
+                    ref_pos[3, m, b] = coord_xyz[3]
                 end
-                if atom_coord_override !== nothing && haskey(atom_coord_override, atom_name)
-                    xyz = atom_coord_override[atom_name]
-                    coords[1, m, b] = xyz[1]
-                    coords[2, m, b] = xyz[2]
-                    coords[3, m, b] = xyz[3]
+                if has_coord_override && atom_present
+                    coords[1, m, b] = coord_xyz[1]
+                    coords[2, m, b] = coord_xyz[2]
+                    coords[3, m, b] = coord_xyz[3]
                 elseif is_nonpoly
                     error("Missing coordinate override for NONPOLYMER atom '$atom_name' at token index $t")
                 end
@@ -876,6 +922,17 @@ function build_design_features(
                     ref_pos[:, included, b] .= rp_aug[:, :, 1]
                 end
             end
+        end
+
+        # Match python featurizer: center atom coordinates using resolved atoms.
+        resolved_sum = sum(atom_resolved_mask[:, b])
+        if resolved_sum > 0f0
+            cx = sum(coords[1, :, b] .* atom_resolved_mask[:, b]) / resolved_sum
+            cy = sum(coords[2, :, b] .* atom_resolved_mask[:, b]) / resolved_sum
+            cz = sum(coords[3, :, b] .* atom_resolved_mask[:, b]) / resolved_sum
+            coords[1, :, b] .-= cx .* atom_pad_mask[:, b]
+            coords[2, :, b] .-= cy .* atom_pad_mask[:, b]
+            coords[3, :, b] .-= cz .* atom_pad_mask[:, b]
         end
 
         for (i, j, bt) in bonds
@@ -1075,7 +1132,9 @@ end
 
 function _token_and_mol_type_from_comp_id(comp_id::AbstractString, is_het::Bool; include_nonpolymer::Bool=false)
     c = uppercase(strip(String(comp_id)))
-    if c in canonical_tokens || c == "UNK"
+    if c == "MSE"
+        return "MET", chain_type_ids["PROTEIN"]
+    elseif c in canonical_tokens || c == "UNK"
         return c == "UNK" ? "UNK" : c, chain_type_ids["PROTEIN"]
     elseif c in ("DA", "DG", "DC", "DT", "DN")
         return c, chain_type_ids["DNA"]
@@ -1284,6 +1343,61 @@ function _expand_oper_expression(expr::AbstractString)
     return combos
 end
 
+function _augment_polymer_placeholders!(
+    keys::Vector{Tuple{String, Int, String, String}},
+    rec_atoms::Dict{Tuple{String, Int, String, String}, Vector{String}},
+    rec_coords::Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}},
+    rec_het::Dict{Tuple{String, Int, String, String}, Bool},
+    chain_poly_seq::Dict{String, Vector{String}},
+)
+    isempty(chain_poly_seq) && return
+
+    chain_order = String[]
+    seen = Set{String}()
+    for (chain, _, _, _) in keys
+        if !(chain in seen)
+            push!(chain_order, chain)
+            push!(seen, chain)
+        end
+    end
+    for chain in sort!(collect(Base.keys(chain_poly_seq)))
+        if !(chain in seen)
+            push!(chain_order, chain)
+            push!(seen, chain)
+        end
+    end
+
+    for chain in chain_order
+        seq = get(chain_poly_seq, chain, nothing)
+        seq === nothing && continue
+        isempty(seq) && continue
+        for pos in 1:length(seq)
+            has_poly_res = false
+            for k in keys
+                if k[1] == chain && k[2] == pos
+                    has_poly_res = true
+                    break
+                end
+            end
+            has_poly_res && continue
+
+            comp = uppercase(strip(seq[pos]))
+            isempty(comp) && (comp = "UNK")
+            new_key = (chain, pos, "", comp)
+            if !haskey(rec_atoms, new_key)
+                rec_atoms[new_key] = String[]
+                rec_coords[new_key] = Dict{String, NTuple{3, Float32}}()
+                rec_het[new_key] = false
+            end
+            push!(keys, new_key)
+        end
+    end
+
+    chain_rank = Dict{String, Int}(c => i for (i, c) in enumerate(chain_order))
+    sort!(keys; by=k -> (get(chain_rank, k[1], typemax(Int)), k[2], k[3], k[4]))
+    return
+end
+
 function _parse_structure_records(path::AbstractString; use_assembly::Bool=false)
     p = lowercase(path)
     if endswith(p, ".pdb")
@@ -1291,7 +1405,23 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
         rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
         rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
         rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+        conn_pairs = Tuple{Tuple{String, Int, String}, Tuple{String, Int, String}, String}[]
+        rec_alt_rank = Dict{Tuple{String, Int, String, String}, Dict{String, Int}}()
         lines = readlines(path)
+        chain_poly_seq = Dict{String, Vector{String}}()
+
+        for line in lines
+            startswith(line, "SEQRES") || continue
+            toks = split(strip(line))
+            length(toks) >= 5 || continue
+            chain = _normalize_chain_id(toks[3])
+            if !haskey(chain_poly_seq, chain)
+                chain_poly_seq[chain] = String[]
+            end
+            for res in toks[5:end]
+                push!(chain_poly_seq[chain], uppercase(strip(res)))
+            end
+        end
 
         pdb_op_rows = Dict{Int, Dict{Int, NTuple{4, Float32}}}()
         pdb_op_chains = Dict{Int, Set{String}}()
@@ -1361,8 +1491,12 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                 continue
             end
             alt = line[17]
-            if !(alt == ' ' || alt == 'A' || alt == '1')
-                continue
+            alt_rank = if alt == ' '
+                0
+            elseif alt == 'A' || alt == '1'
+                1
+            else
+                2
             end
             atom_name = uppercase(strip(line[13:16]))
             isempty(atom_name) && continue
@@ -1380,9 +1514,18 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                 rec_atoms[key] = String[]
                 rec_coords[key] = Dict{String, NTuple{3, Float32}}()
                 rec_het[key] = rec == "HETATM"
+                rec_alt_rank[key] = Dict{String, Int}()
                 push!(keys, key)
             end
-            if !haskey(rec_coords[key], atom_name)
+            ranks = rec_alt_rank[key]
+            curr_rank = get(ranks, atom_name, typemax(Int))
+            if alt_rank < curr_rank
+                if !haskey(rec_coords[key], atom_name)
+                    push!(rec_atoms[key], atom_name)
+                end
+                rec_coords[key][atom_name] = (x, y, z)
+                ranks[atom_name] = alt_rank
+            elseif alt_rank == curr_rank && !haskey(rec_coords[key], atom_name)
                 push!(rec_atoms[key], atom_name)
                 rec_coords[key][atom_name] = (x, y, z)
             end
@@ -1407,11 +1550,13 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                 old_atoms = rec_atoms
                 old_coords = rec_coords
                 old_het = rec_het
+                old_chain_poly_seq = chain_poly_seq
                 all_chains = Set(k[1] for k in old_keys)
                 keys = Tuple{String, Int, String, String}[]
                 rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
                 rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
                 rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+                chain_poly_seq = Dict{String, Vector{String}}()
 
                 op_ids = sort!(collect(Base.keys(pdb_ops)))
                 for (copy_idx, op_id) in enumerate(op_ids)
@@ -1432,18 +1577,26 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                         rec_atoms[new_key] = copy(atoms)
                         rec_coords[new_key] = coords_new
                         rec_het[new_key] = old_het[key]
+                        if haskey(old_chain_poly_seq, chain)
+                            chain_poly_seq[new_chain] = old_chain_poly_seq[chain]
+                        end
                     end
                 end
             else
                 @warn "use_assembly=true requested for PDB path $(path), but no valid REMARK 350 BIOMT transforms were found; using asymmetric unit records."
             end
         end
-        return keys, rec_atoms, rec_coords, rec_het
+        _augment_polymer_placeholders!(keys, rec_atoms, rec_coords, rec_het, chain_poly_seq)
+        return keys, rec_atoms, rec_coords, rec_het, conn_pairs
     elseif endswith(p, ".cif") || endswith(p, ".mmcif")
         keys = Tuple{String, Int, String, String}[]
         rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
         rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
         rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+        conn_pairs = Tuple{Tuple{String, Int, String}, Tuple{String, Int, String}, String}[]
+        rec_alt_rank = Dict{Tuple{String, Int, String, String}, Dict{String, Int}}()
+        chain_to_entity = Dict{String, String}()
+        entity_poly_seq = Dict{String, Dict{Int, String}}()
         assembly_rows = Tuple{String, String, String}[]
         oper_map = Dict{String, NamedTuple{(:m, :v), Tuple{NTuple{9, Float32}, NTuple{3, Float32}}}}()
         assembly_scalar = Dict{String, String}()
@@ -1486,8 +1639,12 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                         model_num = _safeparse_int(col(fields, ["_atom_site.pdbx_PDB_model_num"]), 1)
                         model_num == 1 || continue
                         alt = strip(col(fields, ["_atom_site.label_alt_id"], "."))
-                        if !(alt == "." || alt == "?" || alt == "A" || alt == "1")
-                            continue
+                        alt_rank = if alt == "." || alt == "?"
+                            0
+                        elseif alt == "A" || alt == "1"
+                            1
+                        else
+                            2
                         end
                         atom_name = uppercase(strip(col(fields, ["_atom_site.label_atom_id", "_atom_site.auth_atom_id"])))
                         comp_id = uppercase(strip(col(fields, ["_atom_site.label_comp_id", "_atom_site.auth_comp_id"])))
@@ -1507,9 +1664,18 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                             rec_atoms[key] = String[]
                             rec_coords[key] = Dict{String, NTuple{3, Float32}}()
                             rec_het[key] = group == "HETATM"
+                            rec_alt_rank[key] = Dict{String, Int}()
                             push!(keys, key)
                         end
-                        if !haskey(rec_coords[key], atom_name)
+                        ranks = rec_alt_rank[key]
+                        curr_rank = get(ranks, atom_name, typemax(Int))
+                        if alt_rank < curr_rank
+                            if !haskey(rec_coords[key], atom_name)
+                                push!(rec_atoms[key], atom_name)
+                            end
+                            rec_coords[key][atom_name] = (x, y, z)
+                            ranks[atom_name] = alt_rank
+                        elseif alt_rank == curr_rank && !haskey(rec_coords[key], atom_name)
                             push!(rec_atoms[key], atom_name)
                             rec_coords[key][atom_name] = (x, y, z)
                         end
@@ -1566,6 +1732,75 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                             continue
                         end
                         push!(assembly_rows, (aid, op_expr, asym_list))
+                    end
+                    i = row_after
+                    continue
+                elseif any(startswith(c, "_struct_conn.") for c in cols)
+                    col_idx = Dict{String, Int}(c => k for (k, c) in enumerate(cols))
+                    col = (fields, names::Vector{String}, default::String="") -> begin
+                        for name in names
+                            if haskey(col_idx, name)
+                                return fields[col_idx[name]]
+                            end
+                        end
+                        return default
+                    end
+                    for fields in rows
+                        conn_type = lowercase(strip(col(fields, ["_struct_conn.conn_type_id"])))
+                        conn_type in ("covale", "disulf") || continue
+
+                        chain1 = _normalize_chain_id(col(fields, ["_struct_conn.ptnr1_label_asym_id", "_struct_conn.ptnr1_auth_asym_id"], "_"))
+                        chain2 = _normalize_chain_id(col(fields, ["_struct_conn.ptnr2_label_asym_id", "_struct_conn.ptnr2_auth_asym_id"], "_"))
+                        seq1 = _safeparse_int(col(fields, ["_struct_conn.ptnr1_label_seq_id", "_struct_conn.ptnr1_auth_seq_id"], "0"), 0)
+                        seq2 = _safeparse_int(col(fields, ["_struct_conn.ptnr2_label_seq_id", "_struct_conn.ptnr2_auth_seq_id"], "0"), 0)
+                        ins1 = strip(col(fields, ["_struct_conn.pdbx_ptnr1_PDB_ins_code"], ""))
+                        ins2 = strip(col(fields, ["_struct_conn.pdbx_ptnr2_PDB_ins_code"], ""))
+                        seq1 > 0 || continue
+                        seq2 > 0 || continue
+                        push!(conn_pairs, ((chain1, seq1, ins1), (chain2, seq2, ins2), conn_type))
+                    end
+                    i = row_after
+                    continue
+                elseif any(startswith(c, "_struct_asym.") for c in cols)
+                    col_idx = Dict{String, Int}(c => k for (k, c) in enumerate(cols))
+                    col = (fields, names::Vector{String}, default::String="") -> begin
+                        for name in names
+                            if haskey(col_idx, name)
+                                return fields[col_idx[name]]
+                            end
+                        end
+                        return default
+                    end
+                    for fields in rows
+                        asym_id = _normalize_chain_id(col(fields, ["_struct_asym.id"], "_"))
+                        entity_id = strip(col(fields, ["_struct_asym.entity_id"]))
+                        isempty(asym_id) && continue
+                        isempty(entity_id) && continue
+                        chain_to_entity[asym_id] = entity_id
+                    end
+                    i = row_after
+                    continue
+                elseif any(startswith(c, "_entity_poly_seq.") for c in cols)
+                    col_idx = Dict{String, Int}(c => k for (k, c) in enumerate(cols))
+                    col = (fields, names::Vector{String}, default::String="") -> begin
+                        for name in names
+                            if haskey(col_idx, name)
+                                return fields[col_idx[name]]
+                            end
+                        end
+                        return default
+                    end
+                    for fields in rows
+                        entity_id = strip(col(fields, ["_entity_poly_seq.entity_id"]))
+                        num = _safeparse_int(col(fields, ["_entity_poly_seq.num"]), 0)
+                        mon_id = uppercase(strip(col(fields, ["_entity_poly_seq.mon_id"])))
+                        isempty(entity_id) && continue
+                        num > 0 || continue
+                        isempty(mon_id) && continue
+                        seqmap = get!(entity_poly_seq, entity_id) do
+                            Dict{Int, String}()
+                        end
+                        seqmap[num] = mon_id
                     end
                     i = row_after
                     continue
@@ -1633,10 +1868,12 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                 old_atoms = rec_atoms
                 old_coords = rec_coords
                 old_het = rec_het
+                old_chain_to_entity = chain_to_entity
                 keys = Tuple{String, Int, String, String}[]
                 rec_atoms = Dict{Tuple{String, Int, String, String}, Vector{String}}()
                 rec_coords = Dict{Tuple{String, Int, String, String}, Dict{String, NTuple{3, Float32}}}()
                 rec_het = Dict{Tuple{String, Int, String, String}, Bool}()
+                chain_to_entity = Dict{String, String}()
 
                 copy_ids = sort!(collect(Base.keys(copy_op)))
                 for copy_idx in copy_ids
@@ -1656,11 +1893,33 @@ function _parse_structure_records(path::AbstractString; use_assembly::Bool=false
                         rec_atoms[new_key] = copy(atoms)
                         rec_coords[new_key] = coords_new
                         rec_het[new_key] = old_het[key]
+                        if haskey(old_chain_to_entity, chain)
+                            chain_to_entity[new_chain] = old_chain_to_entity[chain]
+                        end
                     end
                 end
             end
         end
-        return keys, rec_atoms, rec_coords, rec_het
+
+        chain_poly_seq = Dict{String, Vector{String}}()
+        chain_names = Set(k[1] for k in keys)
+        for chain in chain_names
+            entity_id = get(chain_to_entity, chain, "")
+            isempty(entity_id) && continue
+            seqmap = get(entity_poly_seq, entity_id, nothing)
+            seqmap === nothing && continue
+            isempty(seqmap) && continue
+            maxnum = maximum(Base.keys(seqmap))
+            maxnum > 0 || continue
+            seq = fill("UNK", maxnum)
+            for (num, mon) in seqmap
+                1 <= num <= maxnum || continue
+                seq[num] = uppercase(strip(mon))
+            end
+            chain_poly_seq[chain] = seq
+        end
+        _augment_polymer_placeholders!(keys, rec_atoms, rec_coords, rec_het, chain_poly_seq)
+        return keys, rec_atoms, rec_coords, rec_het, conn_pairs
     else
         error("Unsupported structure format (expected .pdb/.cif/.mmcif): $path")
     end
@@ -1672,7 +1931,7 @@ function load_structure_tokens(
     include_nonpolymer::Bool=false,
     use_assembly::Bool=false,
 )
-    keys, rec_atoms, rec_coords, rec_het = _parse_structure_records(path; use_assembly=use_assembly)
+    keys, rec_atoms, rec_coords, rec_het, conn_pairs = _parse_structure_records(path; use_assembly=use_assembly)
 
     keep_chain = nothing
     if include_chains !== nothing
@@ -1682,9 +1941,11 @@ function load_structure_tokens(
     residue_tokens = String[]
     mol_types = Int[]
     chain_labels = String[]
+    comp_ids = String[]
     residue_indices = Int[]
     token_atom_names = Vector{Vector{String}}()
     token_atom_coords = Vector{Dict{String, NTuple{3, Float32}}}()
+    token_res_keys = Tuple{String, Int, String}[]
 
     for key in keys
         chain, res_seq, _, comp_id = key
@@ -1697,12 +1958,24 @@ function load_structure_tokens(
         push!(residue_tokens, tok)
         push!(mol_types, mt)
         push!(chain_labels, chain)
-        push!(residue_indices, res_seq)
+        push!(comp_ids, comp_id)
+        push!(residue_indices, res_seq - 1)
         push!(token_atom_names, copy(rec_atoms[key]))
         push!(token_atom_coords, copy(rec_coords[key]))
+        push!(token_res_keys, (chain, res_seq, key[3]))
     end
 
     isempty(residue_tokens) && error("No polymer residues parsed from structure: $path")
+
+    # Match python parser behavior: residue indices are chain-local 0-based
+    # sequence positions (label_seq-1), not author numbering.
+    chain_pos = Dict{String, Int}()
+    for i in eachindex(chain_labels)
+        c = chain_labels[i]
+        pos = get(chain_pos, c, 0)
+        residue_indices[i] = pos
+        chain_pos[c] = pos + 1
+    end
 
     chain_to_asym = Dict{String, Int}()
     next_asym = 0
@@ -1717,6 +1990,31 @@ function load_structure_tokens(
     entity_ids = copy(asym_ids)
     sym_ids = zeros(Int, length(asym_ids))
 
+    reskey_to_token = Dict{Tuple{String, Int, String}, Int}()
+    for i in eachindex(token_res_keys)
+        k = token_res_keys[i]
+        if !haskey(reskey_to_token, k)
+            reskey_to_token[k] = i
+        end
+    end
+
+    token_bonds = NTuple{3, Int}[]
+    seen_bonds = Set{NTuple{3, Int}}()
+    covalent_bt = get(bond_type_ids, "COVALENT", 1) + 1
+    for (r1, r2, _conn_type) in conn_pairs
+        haskey(reskey_to_token, r1) || continue
+        haskey(reskey_to_token, r2) || continue
+        i = reskey_to_token[r1]
+        j = reskey_to_token[r2]
+        i == j && continue
+        a, b = i < j ? (i, j) : (j, i)
+        bond = (a, b, covalent_bt)
+        if !(bond in seen_bonds)
+            push!(seen_bonds, bond)
+            push!(token_bonds, bond)
+        end
+    end
+
     return (
         residue_tokens=residue_tokens,
         mol_types=mol_types,
@@ -1724,9 +2022,11 @@ function load_structure_tokens(
         entity_ids=entity_ids,
         sym_ids=sym_ids,
         residue_indices=residue_indices,
+        comp_ids=comp_ids,
         token_atom_names=token_atom_names,
         token_atom_coords=token_atom_coords,
         chain_labels=chain_labels,
+        token_bonds=token_bonds,
     )
 end
 

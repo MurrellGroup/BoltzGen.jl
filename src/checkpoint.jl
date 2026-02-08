@@ -1,3 +1,59 @@
+const BOLTZGEN_HF_REPO_ID = "MurrellLab/BoltzGen.jl"
+const BOLTZGEN_HF_REPO_TYPE = nothing
+const BOLTZGEN_CHECKPOINT_ALIASES = Dict(
+    "boltzgen1_diverse" => "boltzgen1_diverse_state_dict.safetensors",
+    "boltzgen1_adherence" => "boltzgen1_adherence_state_dict.safetensors",
+    "boltz2_conf_final" => "boltz2_conf_final_state_dict.safetensors",
+    "boltz2_aff" => "boltz2_aff_state_dict.safetensors",
+)
+
+function default_weights_filename(model_family::AbstractString, with_affinity::Bool)
+    fam = lowercase(strip(String(model_family)))
+    fam in ("boltzgen1", "boltz2") || error(
+        "Unsupported model family '$model_family' (expected boltzgen1 or boltz2)",
+    )
+    if fam == "boltz2"
+        return with_affinity ? "boltz2_aff_state_dict.safetensors" : "boltz2_conf_final_state_dict.safetensors"
+    end
+    return "boltzgen1_diverse_state_dict.safetensors"
+end
+
+function _normalize_weights_filename(weights_spec::AbstractString)
+    spec = strip(String(weights_spec))
+    isempty(spec) && error("Empty weights spec provided.")
+    haskey(BOLTZGEN_CHECKPOINT_ALIASES, spec) && return BOLTZGEN_CHECKPOINT_ALIASES[spec]
+    endswith(lowercase(spec), ".safetensors") && return spec
+    error(
+        "Unsupported weights spec '$weights_spec'. " *
+        "Use a safetensors filename, a supported alias, or an explicit file path.",
+    )
+end
+
+function resolve_weights_path(
+    weights_spec::AbstractString;
+    repo_id::AbstractString=BOLTZGEN_HF_REPO_ID,
+    revision::Union{Nothing,AbstractString}=nothing,
+)
+    spec = strip(String(weights_spec))
+    isempty(spec) && error("Empty weights spec provided.")
+
+    if isfile(spec)
+        return abspath(spec)
+    end
+
+    if startswith(spec, "/") || startswith(spec, ".") || startswith(spec, "~")
+        expanded = startswith(spec, "~") ? expanduser(spec) : spec
+        resolved = abspath(expanded)
+        isfile(resolved) || error("Weights file not found at explicit path: $resolved")
+        return resolved
+    end
+
+    filename = _normalize_weights_filename(spec)
+    return isnothing(revision) ?
+        hf_hub_download(repo_id, filename; repo_type=BOLTZGEN_HF_REPO_TYPE) :
+        hf_hub_download(repo_id, filename; repo_type=BOLTZGEN_HF_REPO_TYPE, revision=revision)
+end
+
 function normalize_state_key(key::String)
     key = replace(key, ".proj_z.0." => ".proj_z_norm.")
     key = replace(key, ".proj_z.1." => ".proj_z.")
@@ -422,7 +478,8 @@ function load_model_from_safetensors(
     confidence_prediction::Bool=false,
     affinity_prediction::Bool=false,
 )
-    state = SafeTensors.load_safetensors(path)
+    resolved_path = resolve_weights_path(path)
+    state = SafeTensors.load_safetensors(resolved_path)
     return load_model_from_state(
         state;
         confidence_prediction=confidence_prediction,

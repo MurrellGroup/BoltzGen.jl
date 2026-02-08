@@ -6,12 +6,14 @@ using Statistics
 using LinearAlgebra
 using Random
 using SafeTensors
+using HuggingFaceApi
 using YAML
 
 include("const.jl")
 include("utils.jl")
 include("features.jl")
 include("smiles.jl")
+include("ccd_cache.jl")
 include("yaml_parser.jl")
 include("checkpoint.jl")
 include("transformers.jl")
@@ -47,5 +49,7 @@ export infer_config
 export load_params!
 export load_model_from_state
 export load_model_from_safetensors
+export resolve_weights_path
+export default_weights_filename
 
 end
