@@ -1,7 +1,4 @@
-import Pkg
-
-const WORKSPACE_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
-Pkg.activate(joinpath(WORKSPACE_ROOT, "Onion.jl"))
+include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
 
 using Onion
 using SafeTensors

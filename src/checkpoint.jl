@@ -21,11 +21,17 @@ end
 function _normalize_weights_filename(weights_spec::AbstractString)
     spec = strip(String(weights_spec))
     isempty(spec) && error("Empty weights spec provided.")
+    if startswith(spec, "/") || startswith(spec, ".") || startswith(spec, "~") || occursin('\\', spec)
+        error(
+            "Local weights paths are disabled. Use a HuggingFace alias or safetensors filename from " *
+            "$(BOLTZGEN_HF_REPO_ID).",
+        )
+    end
     haskey(BOLTZGEN_CHECKPOINT_ALIASES, spec) && return BOLTZGEN_CHECKPOINT_ALIASES[spec]
     endswith(lowercase(spec), ".safetensors") && return spec
     error(
         "Unsupported weights spec '$weights_spec'. " *
-        "Use a safetensors filename, a supported alias, or an explicit file path.",
+        "Use a safetensors filename or a supported alias.",
     )
 end
 
@@ -37,16 +43,17 @@ function resolve_weights_path(
     spec = strip(String(weights_spec))
     isempty(spec) && error("Empty weights spec provided.")
 
-    if isfile(spec)
-        return abspath(spec)
-    end
-
-    if startswith(spec, "/") || startswith(spec, ".") || startswith(spec, "~")
-        expanded = startswith(spec, "~") ? expanduser(spec) : spec
-        resolved = abspath(expanded)
-        isfile(resolved) || error("Weights file not found at explicit path: $resolved")
-        return resolved
-    end
+    # Local path loading intentionally disabled.
+    # Previous local-path logic:
+    # if isfile(spec)
+    #     return abspath(spec)
+    # end
+    # if startswith(spec, "/") || startswith(spec, ".") || startswith(spec, "~")
+    #     expanded = startswith(spec, "~") ? expanduser(spec) : spec
+    #     resolved = abspath(expanded)
+    #     isfile(resolved) || error("Weights file not found at explicit path: $resolved")
+    #     return resolved
+    # end
 
     filename = _normalize_weights_filename(spec)
     return isnothing(revision) ?

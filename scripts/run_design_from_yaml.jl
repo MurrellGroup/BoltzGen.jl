@@ -1,7 +1,4 @@
-import Pkg
-
-const WORKSPACE_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
-Pkg.activate(joinpath(WORKSPACE_ROOT, "Onion.jl"))
+include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
 
 using Onion
 using SafeTensors
@@ -68,7 +65,8 @@ function require_sampling_checkpoint!(weights_spec::AbstractString; requires_des
             )
         end
     end
-    return weights_path
+    # Return the user-facing HF spec, not the resolved local cache path.
+    return strip(String(weights_spec))
 end
 
 function main()

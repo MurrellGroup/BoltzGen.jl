@@ -1,6 +1,5 @@
 using Onion
 using NNlib
-using Zygote
 
 const BGLayerNorm = Onion.BGLayerNorm
 
@@ -348,7 +347,7 @@ function (tm::TemplateModule)(z, feats, pair_mask; use_kernels::Bool=false)
     distogram = dropdims(distogram; dims=5)
     distogram = one_hot(Int.(distogram), tm.num_bins)
 
-    vector_buf = Zygote.Buffer(zeros(Float32, B, T, N, N, 3))
+    vector_buf = zeros(Float32, B, T, N, N, 3)
     @inbounds for b in 1:B
         for t in 1:T
             for i in 1:N
@@ -364,7 +363,7 @@ function (tm::TemplateModule)(z, feats, pair_mask; use_kernels::Bool=false)
             end
         end
     end
-    vector = copy(vector_buf)
+    vector = vector_buf
     norm = abs.(vector)
     unit_vector = ifelse.(norm .> 0f0, vector ./ norm, 0f0)
 

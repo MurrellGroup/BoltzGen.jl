@@ -4,36 +4,46 @@ const _ccd_cache_lock = ReentrantLock()
 const _ccd_cache_open_path = Ref{Union{Nothing,String}}(nothing)
 const _ccd_cache_open_file = Ref{Any}(nothing)
 const _ccd_entry_cache = Dict{Tuple{String,String}, NamedTuple}()
+const BOLTZGEN_MOLS_HF_REPO_ID = "MurrellLab/BoltzGen.jl"
+const BOLTZGEN_MOLS_HF_REPO_TYPE = "datasets"
+const BOLTZGEN_MOLS_HF_FILENAME = "mols_cache.jld2"
 
 function _default_ccd_cache_path()
-    if haskey(ENV, "BOLTZGEN_MOLS_JLD2")
-        p = strip(String(ENV["BOLTZGEN_MOLS_JLD2"]))
-        isempty(p) && error("ENV BOLTZGEN_MOLS_JLD2 is set but empty")
-        return abspath(p)
-    end
-    return normpath(joinpath(@__DIR__, "..", "..", "boltzgen_cache", "mols_cache.jld2"))
+    # Local cache path overrides intentionally disabled.
+    # Previous local-path logic:
+    # if haskey(ENV, "BOLTZGEN_MOLS_JLD2")
+    #     p = strip(String(ENV["BOLTZGEN_MOLS_JLD2"]))
+    #     isempty(p) && error("ENV BOLTZGEN_MOLS_JLD2 is set but empty")
+    #     return abspath(p)
+    # end
+    return hf_hub_download(
+        BOLTZGEN_MOLS_HF_REPO_ID,
+        BOLTZGEN_MOLS_HF_FILENAME;
+        repo_type=BOLTZGEN_MOLS_HF_REPO_TYPE,
+    )
 end
 
 function _resolve_ccd_cache_path(path::Union{Nothing,AbstractString})
-    if path === nothing
-        return _default_ccd_cache_path()
+    if path !== nothing
+        error(
+            "Local CCD cache paths are disabled. Set no cache_path and use the HuggingFace dataset " *
+            "$(BOLTZGEN_MOLS_HF_REPO_ID) / $(BOLTZGEN_MOLS_HF_FILENAME).",
+        )
     end
-    p = strip(String(path))
-    isempty(p) && error("ccd cache path is empty")
-    return abspath(p)
+    if haskey(ENV, "BOLTZGEN_MOLS_JLD2")
+        error(
+            "ENV BOLTZGEN_MOLS_JLD2 is no longer supported. CCD cache is downloaded from HuggingFace dataset " *
+            "$(BOLTZGEN_MOLS_HF_REPO_ID).",
+        )
+    end
+    return _default_ccd_cache_path()
 end
 
 function _open_ccd_cache(cache_path::AbstractString)
     p = abspath(cache_path)
     isfile(p) || error(
-        "CCD cache file not found: $p. Build it with: " *
-        "python /Users/benmurrell/JuliaM3/BoltzGenJuliaPort/BoltzGen.jl/scripts/export_mols_pkl_to_jsonl.py " *
-        "--moldir /Users/benmurrell/JuliaM3/BoltzGenJuliaPort/boltzgen_cache/mols " *
-        "--out /Users/benmurrell/JuliaM3/BoltzGenJuliaPort/boltzgen_cache/mols_export.jsonl " *
-        "and then julia --project=/Users/benmurrell/JuliaM3/BoltzGenJuliaPort/Onion.jl " *
-        "/Users/benmurrell/JuliaM3/BoltzGenJuliaPort/BoltzGen.jl/scripts/build_mols_jld2_cache.jl " *
-        "--jsonl /Users/benmurrell/JuliaM3/BoltzGenJuliaPort/boltzgen_cache/mols_export.jsonl " *
-        "--out /Users/benmurrell/JuliaM3/BoltzGenJuliaPort/boltzgen_cache/mols_cache.jld2",
+        "CCD cache file not found after HuggingFace download: $p. " *
+        "Expected dataset file $(BOLTZGEN_MOLS_HF_FILENAME) in $(BOLTZGEN_MOLS_HF_REPO_ID).",
     )
 
     lock(_ccd_cache_lock) do

@@ -1,7 +1,4 @@
-import Pkg
-
-const WORKSPACE_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
-Pkg.activate(joinpath(WORKSPACE_ROOT, "Onion.jl"))
+include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
 
 function parse_kv_args(args)
     out = Dict{String, String}()
@@ -51,9 +48,9 @@ function main()
     out_pdb37 = out_prefix * "_atom37.pdb"
     out_cif = out_prefix * ".cif"
 
-    run_cmd = `julia --project=$(joinpath(WORKSPACE_ROOT, "Onion.jl")) $(joinpath(WORKSPACE_ROOT, "BoltzGen.jl", "scripts", "run_design_from_yaml.jl")) --yaml $yaml_path --steps $(string(steps)) --recycles $(string(recycles)) --seed $(string(seed)) --weights $weights --out-pdb $out_pdb --out-pdb-atom37 $out_pdb37 --out-cif $out_cif`
-    geo_cmd = `julia --project=$(joinpath(WORKSPACE_ROOT, "Onion.jl")) $(joinpath(WORKSPACE_ROOT, "parity_testing_scripts", "check_output_pdb_geometry.jl")) $out_pdb $out_pdb37`
-    dna_cmd = `julia --project=$(joinpath(WORKSPACE_ROOT, "Onion.jl")) $(joinpath(WORKSPACE_ROOT, "parity_testing_scripts", "check_dna_geometry.jl")) $out_pdb`
+    run_cmd = `julia --project=$RUNFROMHERE_PROJECT $(joinpath(WORKSPACE_ROOT, "BoltzGen.jl", "scripts", "run_design_from_yaml.jl")) --yaml $yaml_path --steps $(string(steps)) --recycles $(string(recycles)) --seed $(string(seed)) --weights $weights --out-pdb $out_pdb --out-pdb-atom37 $out_pdb37 --out-cif $out_cif`
+    geo_cmd = `julia --project=$RUNFROMHERE_PROJECT $(joinpath(WORKSPACE_ROOT, "parity_testing_scripts", "check_output_pdb_geometry.jl")) $out_pdb $out_pdb37`
+    dna_cmd = `julia --project=$RUNFROMHERE_PROJECT $(joinpath(WORKSPACE_ROOT, "parity_testing_scripts", "check_dna_geometry.jl")) $out_pdb`
 
     println("[mixed-smoke] running sample generation")
     run(run_cmd)
