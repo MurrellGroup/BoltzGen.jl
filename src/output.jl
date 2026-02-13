@@ -154,7 +154,7 @@ function postprocess_atom14(feats::Dict, coords; threshold::Float32=0.5f0, inval
     return new
 end
 
-function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
+function write_pdb(io::IO, feats::Dict, coords; batch::Int=1)
     # coords: (3, M) or (3, M, B)
     coords_b = ndims(coords) == 2 ? coords : coords[:, :, batch]
 
@@ -176,63 +176,66 @@ function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
     # Adjust residue index to 1-based if needed for output.
     res_offset = minimum(residue_index) <= 0 ? 1 : 0
 
-    open(path, "w") do io
-        atom_serial = 1
-        M = size(coords_b, 2)
-        skipped = 0
-        clipped = 0
-        for m in 1:M
-            atom_pad_mask[m] > 0.5 || continue
-            token_idx = argmax(view(atom_to_token, m, :))
-            token_pad_mask[token_idx] > 0.5 || (skipped += 1; continue)
-            res_name = _res_name_from_onehot(view(res_type, :, token_idx))
-            res_seq = Int(residue_index[token_idx]) + res_offset
-            chain_id = chain_id_from_asym(Int(asym_id[token_idx]))
-            atom_name = decode_atom_name_chars(view(ref_atom_name_chars, :, :, m))
-            _is_fake_or_mask_atom(atom_name) && (skipped += 1; continue)
-            element = _element_from_atom_name(atom_name)
-            record = (Int(mol_type[token_idx]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
+    atom_serial = 1
+    M = size(coords_b, 2)
+    skipped = 0
+    clipped = 0
+    for m in 1:M
+        atom_pad_mask[m] > 0.5 || continue
+        token_idx = argmax(view(atom_to_token, m, :))
+        token_pad_mask[token_idx] > 0.5 || (skipped += 1; continue)
+        res_name = _res_name_from_onehot(view(res_type, :, token_idx))
+        res_seq = Int(residue_index[token_idx]) + res_offset
+        chain_id = chain_id_from_asym(Int(asym_id[token_idx]))
+        atom_name = decode_atom_name_chars(view(ref_atom_name_chars, :, :, m))
+        _is_fake_or_mask_atom(atom_name) && (skipped += 1; continue)
+        element = _element_from_atom_name(atom_name)
+        record = (Int(mol_type[token_idx]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
 
-            x_raw = coords_b[1, m]
-            y_raw = coords_b[2, m]
-            z_raw = coords_b[3, m]
-            x = _clip_pdb_coord(x_raw)
-            y = _clip_pdb_coord(y_raw)
-            z = _clip_pdb_coord(z_raw)
-            if !isfinite(x) || !isfinite(y) || !isfinite(z)
-                skipped += 1
-                continue
-            end
-            if x != x_raw || y != y_raw || z != z_raw
-                clipped += 1
-            end
+        x_raw = coords_b[1, m]
+        y_raw = coords_b[2, m]
+        z_raw = coords_b[3, m]
+        x = _clip_pdb_coord(x_raw)
+        y = _clip_pdb_coord(y_raw)
+        z = _clip_pdb_coord(z_raw)
+        if !isfinite(x) || !isfinite(y) || !isfinite(z)
+            skipped += 1
+            continue
+        end
+        if x != x_raw || y != y_raw || z != z_raw
+            clipped += 1
+        end
 
-            @printf(
-                io,
-                "%-6s%5d %-4s %3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %-2s\n",
-                record,
-                atom_serial,
-                atom_name,
-                res_name,
-                chain_id,
-                res_seq,
-                x,
-                y,
-                z,
-                1.00,
-                0.00,
-                element,
-            )
-            atom_serial += 1
-        end
-        if skipped > 0
-            @printf(io, "REMARK Skipped %d atoms due to padding/NaNs\n", skipped)
-        end
-        if clipped > 0
-            @printf(io, "REMARK Clipped %d coordinates to PDB range [%.3f, %.3f]\n", clipped, PDB_COORD_MIN, PDB_COORD_MAX)
-        end
-        println(io, "END")
+        @printf(
+            io,
+            "%-6s%5d %-4s %3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %-2s\n",
+            record,
+            atom_serial,
+            atom_name,
+            res_name,
+            chain_id,
+            res_seq,
+            x,
+            y,
+            z,
+            1.00,
+            0.00,
+            element,
+        )
+        atom_serial += 1
     end
+    if skipped > 0
+        @printf(io, "REMARK Skipped %d atoms due to padding/NaNs\n", skipped)
+    end
+    if clipped > 0
+        @printf(io, "REMARK Clipped %d coordinates to PDB range [%.3f, %.3f]\n", clipped, PDB_COORD_MIN, PDB_COORD_MAX)
+    end
+    println(io, "END")
+end
+
+function write_pdb(path::AbstractString, feats::Dict, coords; batch::Int=1)
+    mkpath(dirname(path))
+    open(io -> write_pdb(io, feats, coords; batch=batch), path, "w")
 end
 
 function _token_metadata(feats::Dict, batch::Int)
@@ -313,81 +316,87 @@ function collect_atom37_entries(feats::Dict, coords; batch::Int=1)
     return entries
 end
 
-function write_pdb_atom37(path::AbstractString, feats::Dict, coords; batch::Int=1)
+function write_pdb_atom37(io::IO, feats::Dict, coords; batch::Int=1)
     entries = collect_atom37_entries(feats, coords; batch=batch)
-    open(path, "w") do io
-        clipped = 0
-        for (i, e) in enumerate(entries)
-            x = _clip_pdb_coord(e.x)
-            y = _clip_pdb_coord(e.y)
-            z = _clip_pdb_coord(e.z)
-            if x != e.x || y != e.y || z != e.z
-                clipped += 1
-            end
-            @printf(
-                io,
-                "%-6s%5d %-4s %3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %-2s\n",
-                e.record,
-                i,
-                e.atom_name,
-                e.res_name,
-                e.chain_id,
-                e.res_seq,
-                x,
-                y,
-                z,
-                1.00,
-                0.00,
-                e.element,
-            )
+    clipped = 0
+    for (i, e) in enumerate(entries)
+        x = _clip_pdb_coord(e.x)
+        y = _clip_pdb_coord(e.y)
+        z = _clip_pdb_coord(e.z)
+        if x != e.x || y != e.y || z != e.z
+            clipped += 1
         end
-        if clipped > 0
-            @printf(io, "REMARK Clipped %d coordinates to PDB range [%.3f, %.3f]\n", clipped, PDB_COORD_MIN, PDB_COORD_MAX)
-        end
-        println(io, "END")
+        @printf(
+            io,
+            "%-6s%5d %-4s %3s %1s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f          %-2s\n",
+            e.record,
+            i,
+            e.atom_name,
+            e.res_name,
+            e.chain_id,
+            e.res_seq,
+            x,
+            y,
+            z,
+            1.00,
+            0.00,
+            e.element,
+        )
     end
+    if clipped > 0
+        @printf(io, "REMARK Clipped %d coordinates to PDB range [%.3f, %.3f]\n", clipped, PDB_COORD_MIN, PDB_COORD_MAX)
+    end
+    println(io, "END")
+end
+
+function write_pdb_atom37(path::AbstractString, feats::Dict, coords; batch::Int=1)
+    mkpath(dirname(path))
+    open(io -> write_pdb_atom37(io, feats, coords; batch=batch), path, "w")
+end
+
+function write_mmcif(io::IO, feats::Dict, coords; batch::Int=1)
+    entries = collect_atom37_entries(feats, coords; batch=batch)
+    println(io, "data_generated")
+    println(io, "#")
+    println(io, "loop_")
+    println(io, "_atom_site.group_PDB")
+    println(io, "_atom_site.id")
+    println(io, "_atom_site.type_symbol")
+    println(io, "_atom_site.label_atom_id")
+    println(io, "_atom_site.label_comp_id")
+    println(io, "_atom_site.label_asym_id")
+    println(io, "_atom_site.label_seq_id")
+    println(io, "_atom_site.Cartn_x")
+    println(io, "_atom_site.Cartn_y")
+    println(io, "_atom_site.Cartn_z")
+    println(io, "_atom_site.occupancy")
+    println(io, "_atom_site.B_iso_or_equiv")
+    println(io, "_atom_site.pdbx_PDB_model_num")
+    for (i, e) in enumerate(entries)
+        @printf(
+            io,
+            "%s %d %s %s %s %s %d %.3f %.3f %.3f %.2f %.2f %d\n",
+            e.record,
+            i,
+            e.element,
+            e.atom_name,
+            e.res_name,
+            string(e.chain_id),
+            e.res_seq,
+            e.x,
+            e.y,
+            e.z,
+            1.00,
+            0.00,
+            1,
+        )
+    end
+    println(io, "#")
 end
 
 function write_mmcif(path::AbstractString, feats::Dict, coords; batch::Int=1)
-    entries = collect_atom37_entries(feats, coords; batch=batch)
-    open(path, "w") do io
-        println(io, "data_generated")
-        println(io, "#")
-        println(io, "loop_")
-        println(io, "_atom_site.group_PDB")
-        println(io, "_atom_site.id")
-        println(io, "_atom_site.type_symbol")
-        println(io, "_atom_site.label_atom_id")
-        println(io, "_atom_site.label_comp_id")
-        println(io, "_atom_site.label_asym_id")
-        println(io, "_atom_site.label_seq_id")
-        println(io, "_atom_site.Cartn_x")
-        println(io, "_atom_site.Cartn_y")
-        println(io, "_atom_site.Cartn_z")
-        println(io, "_atom_site.occupancy")
-        println(io, "_atom_site.B_iso_or_equiv")
-        println(io, "_atom_site.pdbx_PDB_model_num")
-        for (i, e) in enumerate(entries)
-            @printf(
-                io,
-                "%s %d %s %s %s %s %d %.3f %.3f %.3f %.2f %.2f %d\n",
-                e.record,
-                i,
-                e.element,
-                e.atom_name,
-                e.res_name,
-                string(e.chain_id),
-                e.res_seq,
-                e.x,
-                e.y,
-                e.z,
-                1.00,
-                0.00,
-                1,
-            )
-        end
-        println(io, "#")
-    end
+    mkpath(dirname(path))
+    open(io -> write_mmcif(io, feats, coords; batch=batch), path, "w")
 end
 
 function geometry_stats_atom37(feats::Dict, coords; batch::Int=1)

@@ -342,28 +342,19 @@ function (tm::TemplateModule)(z, feats, pair_mask; use_kernels::Bool=false)
     cb_flat = reshape(cb_coords, B * T, N, 3)
     dists_flat = pairwise_distance_batch(cb_flat)
     dists = reshape(dists_flat, B, T, N, N)
-    boundaries = range(tm.min_dist, tm.max_dist; length=tm.num_bins-1)
-    distogram = sum(reshape(dists, B, T, N, N, 1) .> reshape(boundaries, 1, 1, 1, 1, :); dims=5)
+    boundaries_cpu = Float32.(collect(range(tm.min_dist, tm.max_dist; length=tm.num_bins-1)))
+    boundaries_dev = copyto!(similar(dists, Float32, length(boundaries_cpu)), boundaries_cpu)
+    distogram = sum(reshape(dists, B, T, N, N, 1) .> reshape(boundaries_dev, 1, 1, 1, 1, :); dims=5)
     distogram = dropdims(distogram; dims=5)
     distogram = one_hot(Int.(distogram), tm.num_bins)
 
-    vector_buf = zeros(Float32, B, T, N, N, 3)
-    @inbounds for b in 1:B
-        for t in 1:T
-            for i in 1:N
-                for j in 1:N
-                    for k in 1:3
-                        acc = 0f0
-                        for l in 1:3
-                            acc += frame_rot[b, t, j, l, k] * (ca_coords[b, t, i, l] - frame_t[b, t, j, l])
-                        end
-                        vector_buf[b, t, i, j, k] = acc
-                    end
-                end
-            end
-        end
-    end
-    vector = vector_buf
+    # Vectorized rotation: vector[b,t,i,j,k] = Σ_l frame_rot[b,t,j,l,k] * (ca_coords[b,t,i,l] - frame_t[b,t,j,l])
+    diff = reshape(ca_coords, B, T, N, 1, 3) .- reshape(frame_t, B, T, 1, N, 3)  # (B, T, N_i, N_j, 3_l)
+    # Rearrange for batched_mul (batch dim must be last): batch = (N_j, B, T)
+    diff_bat = reshape(permutedims(diff, (3, 5, 4, 1, 2)), N, 3, N*B*T)     # (N_i, 3_l, batch)
+    rot_bat = reshape(permutedims(frame_rot, (4, 5, 3, 1, 2)), 3, 3, N*B*T) # (3_l, 3_k, batch)
+    result_bat = NNlib.batched_mul(diff_bat, rot_bat)                          # (N_i, 3_k, batch)
+    vector = permutedims(reshape(result_bat, N, 3, N, B, T), (4, 5, 1, 3, 2)) # (B, T, N_i, N_j, 3_k)
     norm = abs.(vector)
     unit_vector = ifelse.(norm .> 0f0, vector ./ norm, 0f0)
 
@@ -461,8 +452,9 @@ function (tm::TokenDistanceModule)(z, feats, pair_mask, relative_position_encodi
 
     coords_b = permutedims(token_coords, (3,2,1))
     dists = pairwise_distance_batch(coords_b)
-    boundaries = range(tm.min_dist, tm.max_dist; length=tm.num_bins-1)
-    distogram = sum(reshape(dists, size(dists,1), size(dists,2), size(dists,3), 1) .> reshape(boundaries, 1, 1, 1, :); dims=4)
+    boundaries_cpu = Float32.(collect(range(tm.min_dist, tm.max_dist; length=tm.num_bins-1)))
+    boundaries_dev = copyto!(similar(dists, Float32, length(boundaries_cpu)), boundaries_cpu)
+    distogram = sum(reshape(dists, size(dists,1), size(dists,2), size(dists,3), 1) .> reshape(boundaries_dev, 1, 1, 1, :); dims=4)
     distogram = dropdims(distogram; dims=4)
     distogram = one_hot(Int.(distogram), tm.num_bins)
 

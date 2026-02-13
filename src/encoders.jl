@@ -4,7 +4,9 @@ using NNlib
 const BGLayerNorm = Onion.BGLayerNorm
 
 function one_hot(indices::AbstractArray{<:Integer}, num_classes::Int)
-    classes = reshape(collect(0:num_classes-1), ntuple(_ -> 1, ndims(indices))..., num_classes)
+    classes_cpu = reshape(collect(0:num_classes-1), ntuple(_ -> 1, ndims(indices))..., num_classes)
+    # Transfer classes to same device as indices for GPU compatibility
+    classes = copyto!(similar(indices, eltype(classes_cpu), size(classes_cpu)), classes_cpu)
     return Float32.(indices .== classes)
 end
 
@@ -387,15 +389,18 @@ function single_to_keys(single, indexing_matrix, W::Int, H::Int)
     x = permutedims(x, (3,2,1,4))                 # (B, j, i, C)
 
     h = H ÷ (W ÷ 2)
-    index_t = permutedims(indexing_matrix, (2, 1)) # (k, j)
-    out = zeros(Float32, B, h * K, W ÷ 2, C)
-    for b in 1:B
-        for i in 1:(W ÷ 2)
-            x_slice = view(x, b, :, i, :)
-            out_slice = index_t * x_slice
-            out[b, :, i, :] .= out_slice
-        end
-    end
+    index_t = permutedims(indexing_matrix, (2, 1)) # (h*K, 2K)
+    # Transfer indexing matrix to same device as input
+    index_t = copyto!(similar(single, Float32, size(index_t)), index_t)
+
+    # Replace loop with single matmul: index_t @ x_flat for all (b, i) slices at once
+    # x is (B, 2K, W÷2, C) — rearrange so 2K is first dim, flatten the rest
+    x_perm = permutedims(x, (2, 1, 3, 4))        # (2K, B, W÷2, C)
+    x_flat = reshape(x_perm, 2K, :)               # (2K, B*(W÷2)*C)
+    out_flat = index_t * x_flat                    # (h*K, B*(W÷2)*C)
+    out = reshape(out_flat, h * K, B, W ÷ 2, C)   # (h*K, B, W÷2, C)
+    out = permutedims(out, (2, 1, 3, 4))           # (B, h*K, W÷2, C)
+
     # match python row-major reshape of (B, k, i, d) -> (B, K, H, D)
     out = permutedims(out, (1,3,2,4))            # (B, i, k, C)
     out = reshape(out, B, H, K, C)               # (B, H, K, C)
@@ -527,23 +532,28 @@ function (ae::AtomEncoder)(feats; s_trunk=nothing, z=nothing)
         atom_to_token_keys = to_keys(permutedims(atom_to_token, (2,1,3)))
         ln_z, lin_z = ae.z_to_p_trans
         z_to_p = lin_z(ln_z(z))
-        z_bp = permutedims(z_to_p, (4,2,3,1))
-        q_map = permutedims(atom_to_token_queries, (4,2,1,3))
-        k_map = permutedims(atom_to_token_keys, (4,3,2,1))
-        D = size(z_bp, 4)
-        z_proj = zeros(Float32, B, K, W, H, D)
-        for b in 1:B
-            for k in 1:K
-                Q = view(q_map, b, k, :, :)
-                Kmat = view(k_map, b, k, :, :)
-                for d in 1:D
-                    Z = view(z_bp, b, :, :, d)
-                    tmp = Q * Z
-                    z_proj[b, k, :, :, d] .= tmp * transpose(Kmat)
-                end
-            end
-        end
-        z_proj = permutedims(z_proj, (5,3,4,2,1))
+        z_bp = permutedims(z_to_p, (4,2,3,1))                # (B, Nt, Nt, D)
+        q_map = permutedims(atom_to_token_queries, (4,2,1,3)) # (B, K, W, Nt)
+        k_map = permutedims(atom_to_token_keys, (4,3,2,1))    # (B, K, H, Nt)
+        D_z = size(z_bp, 4)
+        Nt = size(z_bp, 2)
+
+        # Vectorized z_proj: z_proj[b,k,w,h,d] = Σ_nq Σ_nk q_map[b,k,w,nq] * z_bp[b,nq,nk,d] * k_map[b,k,h,nk]
+
+        # Step 1: Contract over nq (query tokens), batched over B
+        Q_bat = reshape(permutedims(q_map, (2,3,4,1)), K*W, Nt, B)    # (K*W, Nt, B)
+        Z_bat = reshape(permutedims(z_bp, (2,3,4,1)), Nt, Nt*D_z, B)  # (Nt, Nt*D_z, B)
+        tmp_bat = NNlib.batched_mul(Q_bat, Z_bat)                       # (K*W, Nt*D_z, B)
+        tmp_5d = reshape(tmp_bat, K, W, Nt, D_z, B)                    # (K, W, Nt, D_z, B)
+
+        # Step 2: Contract over nk (key tokens), batched over K*B
+        tmp_r = reshape(permutedims(tmp_5d, (2,4,3,1,5)), W*D_z, Nt, K*B)  # (W*D_z, Nt, K*B)
+        Kt = reshape(permutedims(k_map, (4,3,2,1)), Nt, H, K*B)            # (Nt, H, K*B)
+        result_bat = NNlib.batched_mul(tmp_r, Kt)                            # (W*D_z, H, K*B)
+        result = reshape(result_bat, W, D_z, H, K, B)                       # (W, D_z, H, K, B)
+
+        # Permute to (D_z, W, H, K, B) to match p's layout
+        z_proj = permutedims(result, (2, 1, 3, 4, 5))
         p = p .+ z_proj
     end
 
@@ -713,7 +723,7 @@ function (ad::AtomAttentionDecoder)(; a, q, c, atom_dec_bias, feats, to_keys, mu
         mask = repeat_interleave_batch(feats["atom_pad_mask"], multiplicity)
         src = q .* reshape(mask, 1, size(mask,1), size(mask,2))
         idx_expanded = reshape(idx, 1, size(idx,1), size(idx,2))
-        s_feat = zeros(Float32, size(q,1), size(feats["res_type"],2), size(q,3))
+        s_feat = Onion.zeros_like(q, Float32, size(q,1), size(feats["res_type"],2), size(q,3))
         for b in 1:size(q,3)
             for m in 1:size(q,2)
                 n = idx_expanded[1, m, b]

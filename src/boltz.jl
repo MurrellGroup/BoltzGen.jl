@@ -4,6 +4,14 @@ const BGLayerNorm = Onion.BGLayerNorm
 
 symbolize_keys(d::Dict) = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in d)
 
+# GPU→CPU boundary helpers for confidence/affinity modules
+# (these modules use CPU-only operations: loops, sortperm in compute_ptms, Matrix(I,...), etc.)
+_to_cpu(x::Array) = x
+_to_cpu(x::AbstractArray) = Array(x)
+_to_cpu(x) = x
+_feats_to_cpu(feats::Dict) = Dict{String,Any}(k => _to_cpu(v) for (k, v) in feats)
+_module_to_cpu(m) = Onion.Flux.cpu(m)
+
 @concrete struct BoltzModel <: Onion.Layer
     atom_s::Int
     atom_z::Int
@@ -384,8 +392,8 @@ function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sam
     end
     z_init = z_init .+ model.contact_conditioning(feats)
 
-    s = zeros(Float32, size(s_init))
-    z = zeros(Float32, size(z_init))
+    s = Onion.zeros_like(s_init)
+    z = Onion.zeros_like(z_init)
 
     mask = feats["token_pad_mask"]
     pair_mask = reshape(mask, size(mask,1), 1, size(mask,2)) .* reshape(mask, 1, size(mask,1), size(mask,2))
@@ -451,13 +459,17 @@ function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sam
     end
 
     if model.confidence_prediction && model.confidence_module !== nothing
-        pred_dist_logits = dropdims(pdistogram; dims=4)
-        conf_out = model.confidence_module(
-            s_inputs,
-            s,
-            z,
-            struct_out["sample_atom_coords"],
-            feats,
+        # Confidence utils use CPU-only operations (loops, sortperm in compute_ptms, etc.)
+        # Move data and module weights to CPU for this computation.
+        conf_cpu = _module_to_cpu(model.confidence_module)
+        feats_cpu = _feats_to_cpu(feats)
+        pred_dist_logits = _to_cpu(dropdims(pdistogram; dims=4))
+        conf_out = conf_cpu(
+            _to_cpu(s_inputs),
+            _to_cpu(s),
+            _to_cpu(z),
+            _to_cpu(struct_out["sample_atom_coords"]),
+            feats_cpu,
             pred_dist_logits;
             multiplicity=diffusion_samples,
             run_sequentially=run_confidence_sequentially,
@@ -469,6 +481,7 @@ function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sam
     end
 
     if model.affinity_prediction && (model.affinity_module !== nothing || model.affinity_module1 !== nothing)
+        # Compute masks on the current device (GPU-compatible ops)
         pad_token_mask = feats["token_pad_mask"]
         rec_mask = (feats["mol_type"] .== chain_type_ids["PROTEIN"]) .* pad_token_mask
         lig_mask = (feats["affinity_token_mask"] .> 0) .* pad_token_mask
@@ -486,21 +499,30 @@ function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sam
         coords_affinity = struct_out["sample_atom_coords"][:, :, best_idx:best_idx]
         s_inputs_aff = model.input_embedder(feats; affinity=true)
 
+        # Affinity module uses CPU-only operations (Matrix{Float32}(I,...) in AffinityHeadsTransformer)
+        # Move data and module weights to CPU.
+        feats_cpu_aff = @isdefined(feats_cpu) ? feats_cpu : _feats_to_cpu(feats)
+        z_aff_cpu = _to_cpu(z_affinity)
+        coords_aff_cpu = _to_cpu(coords_affinity)
+        s_inputs_aff_cpu = _to_cpu(s_inputs_aff)
+
         if model.affinity_ensemble
-            dict_out_affinity1 = model.affinity_module1(
-                s_inputs_aff,
-                z_affinity,
-                coords_affinity,
-                feats;
+            aff1_cpu = _module_to_cpu(model.affinity_module1)
+            dict_out_affinity1 = aff1_cpu(
+                s_inputs_aff_cpu,
+                z_aff_cpu,
+                coords_aff_cpu,
+                feats_cpu_aff;
                 multiplicity=1,
                 use_kernels=model.use_kernels,
             )
             prob1 = NNlib.sigmoid.(dict_out_affinity1["affinity_logits_binary"])
-            dict_out_affinity2 = model.affinity_module2(
-                s_inputs_aff,
-                z_affinity,
-                coords_affinity,
-                feats;
+            aff2_cpu = _module_to_cpu(model.affinity_module2)
+            dict_out_affinity2 = aff2_cpu(
+                s_inputs_aff_cpu,
+                z_aff_cpu,
+                coords_aff_cpu,
+                feats_cpu_aff;
                 multiplicity=1,
                 use_kernels=model.use_kernels,
             )
@@ -513,7 +535,7 @@ function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sam
                 model_coef = 1.03525938f0
                 mw_coef = -0.59992683f0
                 bias = 2.83288489f0
-                mw = feats["affinity_mw"] .^ 0.3f0
+                mw = _to_cpu(feats["affinity_mw"]) .^ 0.3f0
                 affinity_pred_value = model_coef .* affinity_pred_value .+ mw_coef .* mw .+ bias
             end
 
@@ -524,11 +546,12 @@ function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sam
             out["affinity_pred_value2"] = dict_out_affinity2["affinity_pred_value"]
             out["affinity_probability_binary2"] = prob2
         else
-            dict_out_affinity = model.affinity_module(
-                s_inputs_aff,
-                z_affinity,
-                coords_affinity,
-                feats;
+            aff_cpu = _module_to_cpu(model.affinity_module)
+            dict_out_affinity = aff_cpu(
+                s_inputs_aff_cpu,
+                z_aff_cpu,
+                coords_aff_cpu,
+                feats_cpu_aff;
                 multiplicity=1,
                 use_kernels=model.use_kernels,
             )

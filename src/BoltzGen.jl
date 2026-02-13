@@ -26,6 +26,7 @@ include("diffusion.jl")
 include("masker.jl")
 include("output.jl")
 include("boltz.jl")
+include("api.jl")
 
 export BoltzModel
 export boltz_forward
@@ -51,5 +52,12 @@ export load_model_from_state
 export load_model_from_safetensors
 export resolve_weights_path
 export default_weights_filename
+
+# REPL API exports
+export BoltzGenHandle, load_boltzgen, load_boltz2
+export design_from_sequence, design_from_yaml, denovo_sample
+export fold_from_sequence, fold_from_structure, target_conditioned_design
+export output_to_pdb, output_to_pdb_atom37, output_to_mmcif
+export write_outputs, confidence_metrics
 
 end

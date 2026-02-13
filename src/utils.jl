@@ -17,7 +17,9 @@ bg_log(x; eps=1f-20) = log.(max.(x, eps))
 silu(x) = x .* NNlib.sigmoid.(x)
 
 struct SwiGLU <: Onion.Layer end
-@layer SwiGLU
+# SwiGLU is stateless (no fields) — override adapt_structure to prevent
+# Flux.gpu() infinite recursion (the @layer Layer in Onion triggers fmap on all subtypes)
+Onion.Flux.Adapt.adapt_structure(to, x::SwiGLU) = x
 
 function (s::SwiGLU)(x)
     c = size(x, 1)
@@ -167,13 +169,8 @@ end
 
 function rotate_coords(coords, R)
     # coords: (3, M, B), R: (3, 3, B)
-    B = size(coords, 3)
-    M = size(coords, 2)
-    out = Array{Float32}(undef, 3, M, B)
-    @inbounds for b in 1:B
-        out[:, :, b] .= transpose(R[:, :, b]) * coords[:, :, b]
-    end
-    return out
+    # Apply R^T @ coords per batch, using batched_mul for GPU compatibility
+    return NNlib.batched_mul(permutedims(R, (2, 1, 3)), coords)
 end
 
 function center(atom_coords, atom_mask)
@@ -188,6 +185,13 @@ function compute_random_augmentation(multiplicity; s_trans=1.0f0)
     R = random_rotations(multiplicity)
     random_trans = randn(Float32, 3, 1, multiplicity) .* Float32(s_trans)
     return R, random_trans
+end
+
+function compute_random_augmentation(multiplicity, device_ref::AbstractArray; s_trans=1.0f0)
+    R_cpu, t_cpu = compute_random_augmentation(multiplicity; s_trans=s_trans)
+    R = copyto!(similar(device_ref, Float32, size(R_cpu)), R_cpu)
+    t = copyto!(similar(device_ref, Float32, size(t_cpu)), t_cpu)
+    return R, t
 end
 
 function repeat_interleave_batch(x, m::Int)
@@ -505,23 +509,23 @@ function weighted_rigid_align(true_coords, pred_coords, weights, mask)
     pcw = pc_centered .* w
     cov = NNlib.batched_mul(pcw, permutedims(tc_centered, (2, 1, 3))) # (3,3,B)
 
-    B = size(cov, 3)
-    rot = Array{Float32}(undef, 3, 3, B)
+    # SVD requires CPU; compute rotation matrices on CPU then transfer back
+    cov_cpu = Array(cov)
+    B = size(cov_cpu, 3)
+    rot_cpu = Array{Float32}(undef, 3, 3, B)
     for b in 1:B
-        cov_b = Float32.(cov[:, :, b])
+        cov_b = Float32.(cov_cpu[:, :, b])
         U, _, V = svd(cov_b)
         Vt = V'
         rot_b = U * Vt
         F = Matrix{Float32}(I, 3, 3)
         F[3, 3] = det(rot_b)
-        rot[:, :, b] = U * F * Vt
+        rot_cpu[:, :, b] = U * F * Vt
     end
 
-    aligned = Array{Float32}(undef, size(true_coords))
-    for b in 1:B
-        aligned[:, :, b] .= rot[:, :, b] * tc_centered[:, :, b]
-    end
-    aligned .+= pred_centroid
+    # Transfer rotation to same device as input and apply via batched_mul
+    rot = copyto!(similar(true_coords, Float32, size(rot_cpu)), rot_cpu)
+    aligned = NNlib.batched_mul(rot, tc_centered) .+ pred_centroid
     return aligned
 end
 

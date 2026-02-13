@@ -277,7 +277,7 @@ function preconditioned_network_forward(ad::AtomDiffusion, noised_atom_coords, s
     batch = size(noised_atom_coords, 3)
     sigma_vec = sigma
     if isa(sigma, Float32) || isa(sigma, Float64)
-        sigma_vec = fill(Float32(sigma), batch)
+        sigma_vec = fill!(similar(noised_atom_coords, Float32, batch), Float32(sigma))
     end
 
     padded_sigma = reshape(sigma_vec, 1, 1, length(sigma_vec))
@@ -394,7 +394,7 @@ function sample(ad::AtomDiffusion; atom_mask, num_sampling_steps=nothing, multip
 
     init_sigma = sigmas[1]
     if atom_coords_init === nothing
-        atom_coords = init_sigma .* randn(Float32, shape)
+        atom_coords = init_sigma .* randn!(similar(atom_mask_rep, Float32, shape))
     else
         atom_coords = Float32.(atom_coords_init)
     end
@@ -414,11 +414,11 @@ function sample(ad::AtomDiffusion; atom_mask, num_sampling_steps=nothing, multip
 
         atom_coords = center(atom_coords, atom_mask_rep)
         if ad.coordinate_augmentation_inference
-            R, random_tr = compute_random_augmentation(multiplicity)
+            R, random_tr = compute_random_augmentation(multiplicity, atom_coords)
             atom_coords = rotate_coords(atom_coords, R) .+ random_tr
         end
 
-        eps = noise_scales[step_idx] * sqrt(noise_var) .* randn(Float32, shape)
+        eps = noise_scales[step_idx] * sqrt(noise_var) .* randn!(similar(atom_coords, Float32, shape))
         atom_coords_noisy = atom_coords .+ eps
 
         atom_coords_denoised, net_out = preconditioned_network_forward(
@@ -465,13 +465,13 @@ function (ad::AtomDiffusion)(; s_inputs, s_trunk, feats, diffusion_conditioning,
 
     atom_coords = center_random_augmentation(atom_coords, atom_mask; augmentation=ad.coordinate_augmentation, centering=true)
     if ad.synchronize_sigmas
-        sigmas = ad.sigma_data .* exp.(ad.P_mean .+ ad.P_std .* randn(Float32, size(atom_coords,3)))
+        sigmas = ad.sigma_data .* exp.(ad.P_mean .+ ad.P_std .* randn!(similar(atom_coords, Float32, size(atom_coords,3))))
     else
-        sigmas = ad.sigma_data .* exp.(ad.P_mean .+ ad.P_std .* randn(Float32, size(atom_coords,3)))
+        sigmas = ad.sigma_data .* exp.(ad.P_mean .+ ad.P_std .* randn!(similar(atom_coords, Float32, size(atom_coords,3))))
     end
 
     padded_sigmas = reshape(sigmas, 1, 1, length(sigmas))
-    noise = randn(Float32, size(atom_coords))
+    noise = randn!(similar(atom_coords))
     noised_atom_coords = atom_coords .+ padded_sigmas .* noise
 
     denoised_atom_coords, net_out = preconditioned_network_forward(
