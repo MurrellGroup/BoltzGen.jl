@@ -1,5 +1,6 @@
 using Onion
 using NNlib
+import Onion: rearrange, @einops_str
 
 const BGLayerNorm = Onion.BGLayerNorm
 
@@ -350,11 +351,10 @@ function (tm::TemplateModule)(z, feats, pair_mask; use_kernels::Bool=false)
 
     # Vectorized rotation: vector[b,t,i,j,k] = Σ_l frame_rot[b,t,j,l,k] * (ca_coords[b,t,i,l] - frame_t[b,t,j,l])
     diff = reshape(ca_coords, B, T, N, 1, 3) .- reshape(frame_t, B, T, 1, N, 3)  # (B, T, N_i, N_j, 3_l)
-    # Rearrange for batched_mul (batch dim must be last): batch = (N_j, B, T)
-    diff_bat = reshape(permutedims(diff, (3, 5, 4, 1, 2)), N, 3, N*B*T)     # (N_i, 3_l, batch)
-    rot_bat = reshape(permutedims(frame_rot, (4, 5, 3, 1, 2)), 3, 3, N*B*T) # (3_l, 3_k, batch)
-    result_bat = NNlib.batched_mul(diff_bat, rot_bat)                          # (N_i, 3_k, batch)
-    vector = permutedims(reshape(result_bat, N, 3, N, B, T), (4, 5, 1, 3, 2)) # (B, T, N_i, N_j, 3_k)
+    diff_bat = rearrange(diff, einops"b t i j l -> i l (j b t)")     # (N_i, 3_l, batch)
+    rot_bat = rearrange(frame_rot, einops"b t j l k -> l k (j b t)") # (3_l, 3_k, batch)
+    result_bat = NNlib.batched_mul(diff_bat, rot_bat)                  # (N_i, 3_k, batch)
+    vector = rearrange(result_bat, einops"i k (j b t) -> b t i j k"; j=N, b=B, t=T)
     norm = abs.(vector)
     unit_vector = ifelse.(norm .> 0f0, vector ./ norm, 0f0)
 

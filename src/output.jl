@@ -160,21 +160,8 @@ function write_pdb(io::IO, feats::Dict, coords; batch::Int=1)
 
     atom_pad_mask = feats["atom_pad_mask"][:, batch]
     atom_to_token = feats["atom_to_token"][:, :, batch]
-    res_type = feats["res_type"][:, :, batch]
-    residue_index = if haskey(feats, "residue_index")
-        feats["residue_index"][:, batch]
-    elseif haskey(feats, "feature_residue_index")
-        feats["feature_residue_index"][:, batch]
-    else
-        feats["token_index"][:, batch]
-    end
-    asym_id = feats["asym_id"][:, batch]
-    mol_type = feats["mol_type"][:, batch]
     ref_atom_name_chars = feats["ref_atom_name_chars"][:, :, :, batch]
-    token_pad_mask = haskey(feats, "token_pad_mask") ? feats["token_pad_mask"][:, batch] : ones(Float32, size(res_type, 2))
-
-    # Adjust residue index to 1-based if needed for output.
-    res_offset = minimum(residue_index) <= 0 ? 1 : 0
+    res_type, residue_index, asym_id, mol_type, token_pad_mask, res_offset = _token_metadata(feats, batch)
 
     atom_serial = 1
     M = size(coords_b, 2)

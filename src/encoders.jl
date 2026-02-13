@@ -1,5 +1,6 @@
 using Onion
 using NNlib
+import Onion: rearrange, @einops_str
 
 const BGLayerNorm = Onion.BGLayerNorm
 
@@ -541,19 +542,18 @@ function (ae::AtomEncoder)(feats; s_trunk=nothing, z=nothing)
         # Vectorized z_proj: z_proj[b,k,w,h,d] = Σ_nq Σ_nk q_map[b,k,w,nq] * z_bp[b,nq,nk,d] * k_map[b,k,h,nk]
 
         # Step 1: Contract over nq (query tokens), batched over B
-        Q_bat = reshape(permutedims(q_map, (2,3,4,1)), K*W, Nt, B)    # (K*W, Nt, B)
-        Z_bat = reshape(permutedims(z_bp, (2,3,4,1)), Nt, Nt*D_z, B)  # (Nt, Nt*D_z, B)
-        tmp_bat = NNlib.batched_mul(Q_bat, Z_bat)                       # (K*W, Nt*D_z, B)
-        tmp_5d = reshape(tmp_bat, K, W, Nt, D_z, B)                    # (K, W, Nt, D_z, B)
+        Q_bat = rearrange(q_map, einops"b k w nq -> (k w) nq b")              # (K*W, Nt, B)
+        Z_bat = rearrange(z_bp, einops"b nq nk d -> nq (nk d) b")             # (Nt, Nt*D_z, B)
+        tmp_bat = NNlib.batched_mul(Q_bat, Z_bat)                               # (K*W, Nt*D_z, B)
+        tmp_5d = rearrange(tmp_bat, einops"(k w) (nk d) b -> k w nk d b"; k=K, w=W, nk=Nt, d=D_z)
 
         # Step 2: Contract over nk (key tokens), batched over K*B
-        tmp_r = reshape(permutedims(tmp_5d, (2,4,3,1,5)), W*D_z, Nt, K*B)  # (W*D_z, Nt, K*B)
-        Kt = reshape(permutedims(k_map, (4,3,2,1)), Nt, H, K*B)            # (Nt, H, K*B)
-        result_bat = NNlib.batched_mul(tmp_r, Kt)                            # (W*D_z, H, K*B)
-        result = reshape(result_bat, W, D_z, H, K, B)                       # (W, D_z, H, K, B)
+        tmp_r = rearrange(tmp_5d, einops"k w nk d b -> (w d) nk (k b)")       # (W*D_z, Nt, K*B)
+        Kt = rearrange(k_map, einops"b k h nk -> nk h (k b)")                 # (Nt, H, K*B)
+        result_bat = NNlib.batched_mul(tmp_r, Kt)                               # (W*D_z, H, K*B)
 
-        # Permute to (D_z, W, H, K, B) to match p's layout
-        z_proj = permutedims(result, (2, 1, 3, 4, 5))
+        # Rearrange to (D_z, W, H, K, B) to match p's layout
+        z_proj = rearrange(result_bat, einops"(w d) h (k b) -> d w h k b"; w=W, d=D_z, k=K, b=B)
         p = p .+ z_proj
     end
 

@@ -239,7 +239,7 @@ function design_from_sequence(
         elseif chain_type == "RNA"
             fill("N", length)
         else
-            error("Unsupported chain-type: $chain_type")
+            error("Unsupported chain_type: \"$chain_type\" (valid: \"PROTEIN\", \"DNA\", \"RNA\")")
         end
     else
         error("Provide either a non-empty sequence or length > 0")
@@ -247,6 +247,8 @@ function design_from_sequence(
 
     T = Base.length(residues)
     dm = if design_mask !== nothing
+        Base.length(design_mask) == T || error(
+            "design_mask length ($(Base.length(design_mask))) must match number of tokens ($T)")
         design_mask
     else
         isempty(sequence) ? trues(T) : falses(T)
@@ -463,7 +465,7 @@ function target_conditioned_design(
         elseif design_chain_type == "RNA"
             fill("N", design_length)
         else
-            error("Unsupported design-chain-type: $design_chain_type")
+            error("Unsupported design_chain_type: \"$design_chain_type\" (valid: \"PROTEIN\", \"DNA\", \"RNA\")")
         end
 
         new_asym = isempty(asym_ids) ? 0 : (maximum(asym_ids) + 1)
