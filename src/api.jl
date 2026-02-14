@@ -625,7 +625,8 @@ function target_conditioned_design(
         end
 
         new_asym = isempty(asym_ids) ? 0 : (maximum(asym_ids) + 1)
-        next_res = isempty(residue_indices) ? 1 : (maximum(residue_indices) + 1)
+        # Python starts residue_index from 0 for each new entity (not continuing
+        # from the target chain). Match that behavior.
         for (k, tok) in enumerate(d_tokens)
             push!(residues, tok)
             push!(mol_types, d_mol_type)
@@ -633,7 +634,7 @@ function target_conditioned_design(
             push!(entity_ids, new_asym)
             push!(sym_ids, 0)
             push!(cyclic_period, 0)
-            push!(residue_indices, next_res + k - 1)
+            push!(residue_indices, k - 1)
             push!(token_atom_names_override, String[])
             push!(token_atom_coords_override, Dict{String,NTuple{3,Float32}}())
         end
@@ -657,6 +658,7 @@ function target_conditioned_design(
         residue_indices=residue_indices,
         design_mask=dm,
         structure_group=structure_group,
+        augment_ref_pos=true,
         batch=1,
         token_atom_names_override=token_atom_names_override,
         token_atom_coords_override=token_atom_coords_override,

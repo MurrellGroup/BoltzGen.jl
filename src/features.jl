@@ -701,7 +701,14 @@ function build_design_features(
             atoms = token_atom_names[t]
             offset = token_atom_offsets[t]
             atom_coord_override = token_atom_coords_override === nothing ? nothing : token_atom_coords_override[t]
-            atom_ref_coord_override = token_atom_ref_coords_override === nothing ? atom_coord_override : token_atom_ref_coords_override[t]
+            # IMPORTANT: ref_pos must ALWAYS come from canonical conformer coordinates
+            # (the static ref_atom_pos table), NEVER from PDB/structure coordinates.
+            # Python's featurizer always uses RDKit canonical conformers for ref_pos,
+            # completely independent of actual structure coords. DO NOT re-enable the
+            # old fallback (`? atom_coord_override :`) — it caused ref_pos to inherit
+            # PDB coords in fold_from_structure and target_conditioned_design, producing
+            # wrong atom encoder embeddings.
+            atom_ref_coord_override = token_atom_ref_coords_override === nothing ? nothing : token_atom_ref_coords_override[t]
             is_nonpoly = mol_types_v[t] == chain_type_ids["NONPOLYMER"]
             has_atom_name_override = token_atom_names_override !== nothing && !isempty(token_atom_names_override[t])
             coord_override_active = atom_coord_override !== nothing && (!isempty(atom_coord_override) || has_atom_name_override)
