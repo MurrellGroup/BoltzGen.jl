@@ -25,6 +25,7 @@ include("diffusion_conditioning.jl")
 include("diffusion.jl")
 include("masker.jl")
 include("output.jl")
+include("bond_lengths.jl")
 include("boltz.jl")
 include("api.jl")
 
@@ -59,5 +60,6 @@ export design_from_sequence, design_from_yaml, denovo_sample
 export fold_from_sequence, fold_from_sequences, fold_from_structure, target_conditioned_design
 export output_to_pdb, output_to_pdb_atom37, output_to_mmcif
 export write_outputs, confidence_metrics
+export check_bond_lengths, print_bond_length_report, BondViolation
 
 end

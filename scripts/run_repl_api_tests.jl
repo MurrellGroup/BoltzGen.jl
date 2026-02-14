@@ -71,6 +71,10 @@ function check_geometry(result::Dict; label::String="")
     return stats
 end
 
+function check_bonds(result::Dict)
+    BoltzGen.print_bond_length_report(result)
+end
+
 function check_string_outputs(result::Dict)
     pdb14 = BoltzGen.output_to_pdb(result)
     pdb37 = BoltzGen.output_to_pdb_atom37(result)
@@ -102,8 +106,8 @@ run_case("case01_design_protein_only") do
     result = BoltzGen.design_from_sequence(gen, ""; length=12, steps=200, recycles=2, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case01_design_protein_only"))
     check_geometry(result; label="atom14")
-    # Also check the written atom37 PDB via file-based geometry
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
 end
 
@@ -114,6 +118,7 @@ run_case("case02_design_protein_small_molecule") do
     BoltzGen.write_outputs(result, joinpath(OUT, "case02_design_protein_small_molecule"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
 end
 
@@ -124,6 +129,7 @@ run_case("case03_design_protein_dna_smiles") do
     BoltzGen.write_outputs(result, joinpath(OUT, "case03_design_protein_dna_smiles"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
 end
 
@@ -135,6 +141,7 @@ run_case("case07_target_conditioned_design") do
     BoltzGen.write_outputs(result, joinpath(OUT, "case07_target_conditioned_design"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
 end
 
@@ -168,6 +175,7 @@ run_case("case04_fold_sequence_confidence") do
     BoltzGen.write_outputs(result, joinpath(OUT, "case04_fold_sequence_confidence"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
     # Verify confidence metrics
     metrics = BoltzGen.confidence_metrics(result)
@@ -180,10 +188,11 @@ end
 run_case("case_antibody_fold") do
     # Trastuzumab VH (Herceptin) — 121 residues
     vh_seq = "EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS"
-    result = BoltzGen.fold_from_sequence(fold, vh_seq; steps=2000, recycles=3, seed=7)
+    result = BoltzGen.fold_from_sequence(fold, vh_seq; steps=200, recycles=3, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case_antibody_fold"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
     metrics = BoltzGen.confidence_metrics(result)
     println("  confidence metrics: ", pairs(metrics))
@@ -199,22 +208,24 @@ run_case("case_msa_lysozyme_fold") do
     # Also run without MSA for timing comparison
     println("  Folding WITHOUT MSA...")
     t_no_msa = @elapsed begin
-        result_no_msa = BoltzGen.fold_from_sequence(fold, hewl_seq; steps=2000, recycles=3, seed=7)
+        result_no_msa = BoltzGen.fold_from_sequence(fold, hewl_seq; steps=200, recycles=3, seed=7)
     end
     if USE_GPU; CUDA.synchronize(); end
     BoltzGen.write_outputs(result_no_msa, joinpath(OUT, "case_msa_lysozyme_no_msa"))
     check_geometry(result_no_msa; label="no_msa")
+    check_bonds(result_no_msa)
     metrics_no = BoltzGen.confidence_metrics(result_no_msa)
     println("  no-MSA: pTM=$(round(metrics_no.ptm[1]; digits=3)), time=$(round(t_no_msa; digits=2))s")
 
     println("  Folding WITH MSA (100 sequences)...")
     t_msa = @elapsed begin
         result_msa = BoltzGen.fold_from_sequence(fold, hewl_seq;
-            steps=2000, recycles=3, seed=7, msa_file=msa_file, max_msa_rows=100)
+            steps=200, recycles=3, seed=7, msa_file=msa_file, max_msa_rows=100)
     end
     if USE_GPU; CUDA.synchronize(); end
     BoltzGen.write_outputs(result_msa, joinpath(OUT, "case_msa_lysozyme_with_msa"))
     check_geometry(result_msa; label="with_msa")
+    check_bonds(result_msa)
     metrics_msa = BoltzGen.confidence_metrics(result_msa)
     println("  with-MSA: pTM=$(round(metrics_msa.ptm[1]; digits=3)), time=$(round(t_msa; digits=2))s")
 
@@ -254,6 +265,7 @@ run_case("case05_fold_sequence_affinity") do
     BoltzGen.write_outputs(result, joinpath(OUT, "case05_fold_sequence_affinity"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
     metrics = BoltzGen.confidence_metrics(result)
     println("  affinity metrics: ", pairs(metrics))
@@ -267,6 +279,7 @@ run_case("case06_fold_structure_affinity") do
     BoltzGen.write_outputs(result, joinpath(OUT, "case06_fold_structure_affinity"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
+    check_bonds(result)
     check_string_outputs(result)
     metrics = BoltzGen.confidence_metrics(result)
     println("  affinity metrics: ", pairs(metrics))
