@@ -72,6 +72,49 @@ const _EXPECTED_BOND_LENGTHS = let d = Dict{Tuple{String,String,String}, Float32
     d
 end
 
+# Override sp2 carboxylate/aromatic bond lengths that the ref_atom_pos table gets
+# wrong (it stores sp3-like distances, but these bonds are shorter in reality).
+const _SP2_BOND_LENGTH_OVERRIDES = Dict{Tuple{String,String,String}, Float32}(
+    # Carboxylate oxygens: C=O / C-O resonance, actual ~1.25 A
+    ("ASP", "CG", "OD1") => 1.25f0,
+    ("ASP", "CG", "OD2") => 1.25f0,
+    ("GLU", "CD", "OE1") => 1.25f0,
+    ("GLU", "CD", "OE2") => 1.25f0,
+    # Guanidinium C-N bonds in ARG: resonance, actual ~1.33 A
+    ("ARG", "NE", "CZ")  => 1.33f0,
+    ("ARG", "CZ", "NH1") => 1.33f0,
+    ("ARG", "CZ", "NH2") => 1.33f0,
+    # Aromatic C-C bonds: actual ~1.38 A (ref table has sp3 ~1.53)
+    ("PHE", "CG", "CD1") => 1.38f0,
+    ("PHE", "CG", "CD2") => 1.38f0,
+    ("PHE", "CD1", "CE1") => 1.38f0,
+    ("PHE", "CD2", "CE2") => 1.38f0,
+    ("PHE", "CE1", "CZ") => 1.38f0,
+    ("PHE", "CE2", "CZ") => 1.38f0,
+    ("TYR", "CG", "CD1") => 1.38f0,
+    ("TYR", "CG", "CD2") => 1.38f0,
+    ("TYR", "CD1", "CE1") => 1.38f0,
+    ("TYR", "CD2", "CE2") => 1.38f0,
+    ("TYR", "CE1", "CZ") => 1.38f0,
+    ("TYR", "CE2", "CZ") => 1.38f0,
+    ("TRP", "CG", "CD1") => 1.38f0,
+    ("TRP", "CG", "CD2") => 1.43f0,
+    ("TRP", "CD1", "NE1") => 1.38f0,
+    ("TRP", "NE1", "CE2") => 1.37f0,
+    ("TRP", "CD2", "CE2") => 1.41f0,
+    ("TRP", "CD2", "CE3") => 1.40f0,
+    ("TRP", "CE2", "CZ2") => 1.40f0,
+    ("TRP", "CE3", "CZ3") => 1.38f0,
+    ("TRP", "CZ2", "CH2") => 1.37f0,
+    ("TRP", "CZ3", "CH2") => 1.40f0,
+    # HIS ring bonds
+    ("HIS", "CG", "ND1") => 1.37f0,
+    ("HIS", "CG", "CD2") => 1.35f0,
+    ("HIS", "ND1", "CE1") => 1.32f0,
+    ("HIS", "CD2", "NE2") => 1.37f0,
+    ("HIS", "CE1", "NE2") => 1.32f0,
+)
+
 # Peptide bond length C(i)-N(i+1): use average from ref positions
 const _PEPTIDE_BOND_LENGTH = let
     lengths = Float32[]
@@ -192,8 +235,11 @@ function check_bond_lengths(feats::Dict, coords; batch::Int=1, tol_low::Float64=
         for (a1, a2, is_bb) in all_bonds
             haskey(amap, a1) && haskey(amap, a2) || continue
 
-            # Get expected length
-            expected = get(_EXPECTED_BOND_LENGTHS, (res, a1, a2), nothing)
+            # Get expected length (sp2 overrides take priority)
+            expected = get(_SP2_BOND_LENGTH_OVERRIDES, (res, a1, a2), nothing)
+            if expected === nothing
+                expected = get(_EXPECTED_BOND_LENGTHS, (res, a1, a2), nothing)
+            end
             if expected === nothing
                 # Try generic backbone from any residue that has it
                 for fallback_res in ("ALA", "GLY")
