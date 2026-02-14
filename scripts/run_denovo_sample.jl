@@ -1,5 +1,7 @@
 include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
 
+using CUDA
+using cuDNN
 using Onion
 using SafeTensors
 using Random
@@ -76,6 +78,8 @@ function main()
         recycling_steps=recycling_steps,
         num_sampling_steps=num_sampling_steps,
         diffusion_samples=1,
+        step_scale=1.8f0,
+        noise_scale=0.95f0,
         inference_logging=false,
     )
 
@@ -86,6 +90,11 @@ function main()
     mkpath(dirname(out_pdb37))
     BoltzGen.write_pdb(out_pdb, feats_out, coords; batch=1)
     BoltzGen.write_pdb_atom37(out_pdb37, feats_out, coords; batch=1)
+
+    # Bond length validation
+    bond_stats = BoltzGen.check_bond_lengths(feats_out, coords; batch=1)
+    BoltzGen.print_bond_length_report(bond_stats)
+
     if !isempty(out_heads)
         mkpath(dirname(out_heads))
         open(out_heads, "w") do io

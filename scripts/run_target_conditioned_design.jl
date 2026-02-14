@@ -1,5 +1,7 @@
 include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
 
+using CUDA
+using cuDNN
 using Onion
 using SafeTensors
 using Random
@@ -273,6 +275,10 @@ function main()
     )
 
     feats_masked = BoltzGen.boltz_masker(feats; mask=true, mask_backbone=false)
+
+    is_design = any(design_mask)
+    override_step_scale = (is_design && model_family == "boltzgen1") ? 1.8f0 : nothing
+    override_noise_scale = (is_design && model_family == "boltzgen1") ? 0.95f0 : nothing
     println("[progress] sampling: starting diffusion (steps=", steps, ", recycles=", recycles, ")")
     out = BoltzGen.boltz_forward(
         model,
@@ -280,6 +286,8 @@ function main()
         recycling_steps=recycles,
         num_sampling_steps=steps,
         diffusion_samples=1,
+        step_scale=override_step_scale,
+        noise_scale=override_noise_scale,
         inference_logging=false,
     )
 
@@ -310,6 +318,10 @@ function main()
     BoltzGen.write_pdb(out_pdb, feats_out, coords; batch=1)
     BoltzGen.write_pdb_atom37(out_pdb37, feats_out, coords; batch=1)
     BoltzGen.write_mmcif(out_cif, feats_out, coords; batch=1)
+
+    # Bond length validation
+    bond_stats = BoltzGen.check_bond_lengths(feats_out, coords; batch=1)
+    BoltzGen.print_bond_length_report(bond_stats)
 
     if !isempty(out_heads)
         mkpath(dirname(out_heads))

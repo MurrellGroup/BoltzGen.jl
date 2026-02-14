@@ -1,5 +1,7 @@
 include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
 
+using CUDA
+using cuDNN
 using Onion
 using SafeTensors
 using Random
@@ -280,6 +282,19 @@ function main()
     )
 
     feats_masked = BoltzGen.boltz_masker(feats; mask=true, mask_backbone=false)
+
+    # Protocol-specific diffusion overrides.  The checkpoint stores base defaults
+    # (step_scale=1.0, noise_scale=1.0, af3 schedule) matching the Python AtomDiffusion
+    # constructor.  BoltzGen1 design overrides these to match the Python design.yaml:
+    #   step_scale=1.8, noise_scale=0.95, sampling_schedule="dilated",
+    #   time_dilation=2.667, time_dilation_start=0.6, time_dilation_end=0.8
+    is_design = any(design_mask)
+    override_step_scale = (is_design && model_family == "boltzgen1") ? 1.8f0 : nothing
+    override_noise_scale = (is_design && model_family == "boltzgen1") ? 0.95f0 : nothing
+    override_schedule = (is_design && model_family == "boltzgen1") ? "dilated" : nothing
+    override_td = (is_design && model_family == "boltzgen1") ? 2.667f0 : nothing
+    override_tds = (is_design && model_family == "boltzgen1") ? 0.6f0 : nothing
+    override_tde = (is_design && model_family == "boltzgen1") ? 0.8f0 : nothing
     println("[progress] sampling: starting diffusion (steps=", steps, ", recycles=", recycles, ")")
 
     out = BoltzGen.boltz_forward(
@@ -288,6 +303,12 @@ function main()
         recycling_steps=recycles,
         num_sampling_steps=steps,
         diffusion_samples=1,
+        step_scale=override_step_scale,
+        noise_scale=override_noise_scale,
+        sampling_schedule=override_schedule,
+        time_dilation=override_td,
+        time_dilation_start=override_tds,
+        time_dilation_end=override_tde,
         inference_logging=false,
     )
 
@@ -322,6 +343,10 @@ function main()
     BoltzGen.write_pdb(out_pdb, feats_out, coords; batch=1)
     BoltzGen.write_pdb_atom37(out_pdb37, feats_out, coords; batch=1)
     BoltzGen.write_mmcif(out_cif, feats_out, coords; batch=1)
+
+    # Bond length validation
+    bond_stats = BoltzGen.check_bond_lengths(feats_out, coords; batch=1)
+    BoltzGen.print_bond_length_report(bond_stats)
 
     if !isempty(out_heads)
         mkpath(dirname(out_heads))

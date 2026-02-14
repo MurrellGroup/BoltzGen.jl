@@ -178,7 +178,10 @@ end
 # ── Common forward + postprocess ────────────────────────────────────────────────
 
 function _run_forward(handle::BoltzGenHandle, feats::Dict, feats_masked::Dict;
-    steps::Int, recycles::Int, batch::Int=1)
+    steps::Int, recycles::Int, batch::Int=1,
+    step_scale=nothing, noise_scale=nothing,
+    sampling_schedule=nothing, time_dilation=nothing,
+    time_dilation_start=nothing, time_dilation_end=nothing)
 
     # Transfer masked features to model device (GPU if on_gpu)
     feats_fwd = _feats_to_device(feats_masked, handle)
@@ -189,6 +192,12 @@ function _run_forward(handle::BoltzGenHandle, feats::Dict, feats_masked::Dict;
         recycling_steps=recycles,
         num_sampling_steps=steps,
         diffusion_samples=1,
+        step_scale=step_scale,
+        noise_scale=noise_scale,
+        sampling_schedule=sampling_schedule,
+        time_dilation=time_dilation,
+        time_dilation_start=time_dilation_start,
+        time_dilation_end=time_dilation_end,
         inference_logging=false,
     )
 
@@ -292,7 +301,10 @@ function design_from_sequence(
     )
 
     feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)
-    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1)
+    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1,
+        step_scale=1.8f0, noise_scale=0.95f0,
+        sampling_schedule="dilated", time_dilation=2.667f0,
+        time_dilation_start=0.6f0, time_dilation_end=0.8f0)
 end
 
 # ── design_from_yaml ────────────────────────────────────────────────────────────
@@ -346,7 +358,10 @@ function design_from_yaml(
     )
 
     feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)
-    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1)
+    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1,
+        step_scale=1.8f0, noise_scale=0.95f0,
+        sampling_schedule="dilated", time_dilation=2.667f0,
+        time_dilation_start=0.6f0, time_dilation_end=0.8f0)
 end
 
 # ── fold_from_sequence ──────────────────────────────────────────────────────────
@@ -390,6 +405,7 @@ function fold_from_sequence(
         design_mask=dm,
         msa_sequences=msa_seqs,
         max_msa_rows=max_msa_rows,
+        augment_ref_pos=true,
         batch=1,
     )
 
@@ -484,6 +500,7 @@ function fold_from_sequences(
         design_mask=dm,
         msa_sequences=msa_seqs,
         max_msa_rows=max_msa_rows,
+        augment_ref_pos=true,
         batch=1,
     )
 
@@ -546,6 +563,7 @@ function fold_from_structure(
         affinity_token_mask=affinity_token_mask,
         msa_sequences=msa_seqs,
         max_msa_rows=max_msa_rows,
+        augment_ref_pos=true,
         batch=1,
         token_atom_names_override=parsed.token_atom_names,
         token_atom_coords_override=parsed.token_atom_coords,
@@ -645,7 +663,10 @@ function target_conditioned_design(
     )
 
     feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)
-    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1)
+    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1,
+        step_scale=1.8f0, noise_scale=0.95f0,
+        sampling_schedule="dilated", time_dilation=2.667f0,
+        time_dilation_start=0.6f0, time_dilation_end=0.8f0)
 end
 
 # ── denovo_sample ───────────────────────────────────────────────────────────────
@@ -667,7 +688,10 @@ function denovo_sample(
 
     feats = build_denovo_atom14_features(length)
     feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)
-    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1)
+    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1,
+        step_scale=1.8f0, noise_scale=0.95f0,
+        sampling_schedule="dilated", time_dilation=2.667f0,
+        time_dilation_start=0.6f0, time_dilation_end=0.8f0)
 end
 
 # ── Output functions ────────────────────────────────────────────────────────────

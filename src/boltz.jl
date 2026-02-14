@@ -377,7 +377,7 @@ function BoltzModel(
     )
 end
 
-function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sampling_steps=nothing, diffusion_samples::Int=1, step_scale=nothing, noise_scale=nothing, atom_coords_init=nothing, return_z_feats::Bool=false, run_confidence_sequentially::Bool=false, inference_logging::Bool=false)
+function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sampling_steps=nothing, diffusion_samples::Int=1, step_scale=nothing, noise_scale=nothing, sampling_schedule=nothing, time_dilation=nothing, time_dilation_start=nothing, time_dilation_end=nothing, atom_coords_init=nothing, return_z_feats::Bool=false, run_confidence_sequentially::Bool=false, inference_logging::Bool=false)
     s_inputs = model.input_embedder(feats)
 
     s_init = model.s_init(s_inputs)
@@ -447,6 +447,10 @@ function boltz_forward(model::BoltzModel, feats; recycling_steps::Int=0, num_sam
         diffusion_conditioning=diffusion_conditioning,
         step_scale=step_scale,
         noise_scale=noise_scale,
+        sampling_schedule=sampling_schedule,
+        time_dilation=time_dilation,
+        time_dilation_start=time_dilation_start,
+        time_dilation_end=time_dilation_end,
         atom_coords_init=atom_coords_init,
         inference_logging=inference_logging,
     )

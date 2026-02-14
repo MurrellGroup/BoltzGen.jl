@@ -38,6 +38,18 @@ else
 end
 mkpath(OUT)
 
+const LOG_FILE = joinpath(OUT, "test_log.txt")
+const LOG_IO = open(LOG_FILE, "w")
+
+function tee(args...)
+    println(stdout, args...)
+    println(LOG_IO, args...)
+end
+
+function tee_flush()
+    flush(LOG_IO)
+end
+
 const YAML_DIR = normpath(joinpath(@__DIR__, "..", "examples"))
 
 # ── Test runner bookkeeping ─────────────────────────────────────────────────────
@@ -45,23 +57,24 @@ const YAML_DIR = normpath(joinpath(@__DIR__, "..", "examples"))
 const results = Tuple{String,Symbol,String,Float64}[]  # (name, :PASS/:FAIL, detail, elapsed_s)
 
 function run_case(f::Function, name::String)
-    println("\n", "="^60)
-    println("  CASE: ", name)
-    println("="^60)
+    tee("\n", "="^60)
+    tee("  CASE: ", name)
+    tee("="^60)
     try
         elapsed = @elapsed f()
         push!(results, (name, :PASS, "", elapsed))
-        println("[PASS] ", name, " ($(round(elapsed; digits=2))s)")
+        tee("[PASS] ", name, " ($(round(elapsed; digits=2))s)")
     catch e
         msg = sprint(showerror, e, catch_backtrace())
         push!(results, (name, :FAIL, msg, 0.0))
-        println("[FAIL] ", name, ": ", msg)
+        tee("[FAIL] ", name, ": ", msg)
     end
+    tee_flush()
 end
 
 function check_geometry(result::Dict; label::String="")
     stats = BoltzGen.assert_geometry_sane_atom37!(result["feats"], result["coords"]; batch=1)
-    println("  geometry: n_atoms=", stats.n_atoms,
+    tee("  geometry: n_atoms=", stats.n_atoms,
         " max_abs=", round(stats.max_abs; digits=2),
         " min_nn=", round(stats.min_nearest_neighbor; digits=3),
         " max_nn=", round(stats.max_nearest_neighbor; digits=3),
@@ -72,7 +85,8 @@ function check_geometry(result::Dict; label::String="")
 end
 
 function check_bonds(result::Dict)
-    BoltzGen.print_bond_length_report(result)
+    BoltzGen.print_bond_length_report(result; io=stdout)
+    BoltzGen.print_bond_length_report(result; io=LOG_IO)
 end
 
 function check_string_outputs(result::Dict)
@@ -82,23 +96,23 @@ function check_string_outputs(result::Dict)
     length(pdb14) > 10 || error("output_to_pdb returned empty/tiny string ($(length(pdb14)) bytes)")
     length(pdb37) > 10 || error("output_to_pdb_atom37 returned empty/tiny string ($(length(pdb37)) bytes)")
     length(cif) > 10 || error("output_to_mmcif returned empty/tiny string ($(length(cif)) bytes)")
-    println("  string outputs: pdb14=$(length(pdb14))B, pdb37=$(length(pdb37))B, cif=$(length(cif))B")
+    tee("  string outputs: pdb14=$(length(pdb14))B, pdb37=$(length(pdb37))B, cif=$(length(cif))B")
 end
 
 # ── Phase 1: BoltzGen1 (design model) ──────────────────────────────────────────
 
-println("\n", "#"^60)
-println("  Loading BoltzGen1 design model", USE_GPU ? " (GPU)" : "", "...")
-println("#"^60)
+tee("\n", "#"^60)
+tee("  Loading BoltzGen1 design model", USE_GPU ? " (GPU)" : "", "...")
+tee("#"^60)
 gen = BoltzGen.load_boltzgen(; gpu=USE_GPU)
-println("Loaded: ", gen)
+tee("Loaded: ", gen)
 
 # Warmup: compile all code paths before timing
-println("\n  Warmup: compiling design code paths...")
+tee("\n  Warmup: compiling design code paths...")
 warmup_t = @elapsed begin
     BoltzGen.design_from_sequence(gen, ""; length=5, steps=2, recycles=1, seed=1)
 end
-println("  warmup completed in $(round(warmup_t; digits=1))s")
+tee("  warmup completed in $(round(warmup_t; digits=1))s")
 if USE_GPU; CUDA.synchronize(); end
 
 # Case 01: Design protein only (de novo, length=12)
@@ -146,7 +160,7 @@ run_case("case07_target_conditioned_design") do
 end
 
 # Release boltzgen1 model
-println("\nReleasing BoltzGen1 model...")
+tee("\nReleasing BoltzGen1 model...")
 gen = nothing
 GC.gc()
 if USE_GPU
@@ -155,18 +169,18 @@ end
 
 # ── Phase 2: Boltz2 confidence model ───────────────────────────────────────────
 
-println("\n", "#"^60)
-println("  Loading Boltz2 confidence model", USE_GPU ? " (GPU)" : "", "...")
-println("#"^60)
+tee("\n", "#"^60)
+tee("  Loading Boltz2 confidence model", USE_GPU ? " (GPU)" : "", "...")
+tee("#"^60)
 fold = BoltzGen.load_boltz2(; affinity=false, gpu=USE_GPU)
-println("Loaded: ", fold)
+tee("Loaded: ", fold)
 
 # Warmup: compile fold code paths before timing
-println("\n  Warmup: compiling fold code paths...")
+tee("\n  Warmup: compiling fold code paths...")
 warmup_t = @elapsed begin
     BoltzGen.fold_from_sequence(fold, "GGGGG"; steps=2, recycles=1, seed=1)
 end
-println("  warmup completed in $(round(warmup_t; digits=1))s")
+tee("  warmup completed in $(round(warmup_t; digits=1))s")
 if USE_GPU; CUDA.synchronize(); end
 
 # Case 04: Fold sequence with confidence (GGGGGGGGGGGGGG)
@@ -179,7 +193,7 @@ run_case("case04_fold_sequence_confidence") do
     check_string_outputs(result)
     # Verify confidence metrics
     metrics = BoltzGen.confidence_metrics(result)
-    println("  confidence metrics: ", pairs(metrics))
+    tee("  confidence metrics: ", pairs(metrics))
     hasproperty(metrics, :ptm) || error("Missing ptm in confidence metrics")
     hasproperty(metrics, :iptm) || error("Missing iptm in confidence metrics")
 end
@@ -195,7 +209,7 @@ run_case("case_antibody_fold") do
     check_bonds(result)
     check_string_outputs(result)
     metrics = BoltzGen.confidence_metrics(result)
-    println("  confidence metrics: ", pairs(metrics))
+    tee("  confidence metrics: ", pairs(metrics))
 end
 
 # Case MSA: Fold lysozyme (HEWL, 129 residues) with 100-sequence real MSA
@@ -206,7 +220,7 @@ run_case("case_msa_lysozyme_fold") do
     isfile(msa_file) || error("MSA file not found at $msa_file")
 
     # Also run without MSA for timing comparison
-    println("  Folding WITHOUT MSA...")
+    tee("  Folding WITHOUT MSA...")
     t_no_msa = @elapsed begin
         result_no_msa = BoltzGen.fold_from_sequence(fold, hewl_seq; steps=200, recycles=3, seed=7)
     end
@@ -215,9 +229,9 @@ run_case("case_msa_lysozyme_fold") do
     check_geometry(result_no_msa; label="no_msa")
     check_bonds(result_no_msa)
     metrics_no = BoltzGen.confidence_metrics(result_no_msa)
-    println("  no-MSA: pTM=$(round(metrics_no.ptm[1]; digits=3)), time=$(round(t_no_msa; digits=2))s")
+    tee("  no-MSA: pTM=$(round(metrics_no.ptm[1]; digits=3)), time=$(round(t_no_msa; digits=2))s")
 
-    println("  Folding WITH MSA (100 sequences)...")
+    tee("  Folding WITH MSA (100 sequences)...")
     t_msa = @elapsed begin
         result_msa = BoltzGen.fold_from_sequence(fold, hewl_seq;
             steps=200, recycles=3, seed=7, msa_file=msa_file, max_msa_rows=100)
@@ -227,16 +241,16 @@ run_case("case_msa_lysozyme_fold") do
     check_geometry(result_msa; label="with_msa")
     check_bonds(result_msa)
     metrics_msa = BoltzGen.confidence_metrics(result_msa)
-    println("  with-MSA: pTM=$(round(metrics_msa.ptm[1]; digits=3)), time=$(round(t_msa; digits=2))s")
+    tee("  with-MSA: pTM=$(round(metrics_msa.ptm[1]; digits=3)), time=$(round(t_msa; digits=2))s")
 
-    println("\n  MSA timing comparison:")
-    println("    without MSA (S=1):   $(round(t_no_msa; digits=2))s")
-    println("    with MSA (S=100):    $(round(t_msa; digits=2))s")
-    println("    ratio: $(round(t_msa / t_no_msa; digits=2))x")
+    tee("\n  MSA timing comparison:")
+    tee("    without MSA (S=1):   $(round(t_no_msa; digits=2))s")
+    tee("    with MSA (S=100):    $(round(t_msa; digits=2))s")
+    tee("    ratio: $(round(t_msa / t_no_msa; digits=2))x")
 end
 
 # Release boltz2 conf model
-println("\nReleasing Boltz2 confidence model...")
+tee("\nReleasing Boltz2 confidence model...")
 fold = nothing
 GC.gc()
 if USE_GPU
@@ -245,18 +259,18 @@ end
 
 # ── Phase 3: Boltz2 affinity model ─────────────────────────────────────────────
 
-println("\n", "#"^60)
-println("  Loading Boltz2 affinity model", USE_GPU ? " (GPU)" : "", "...")
-println("#"^60)
+tee("\n", "#"^60)
+tee("  Loading Boltz2 affinity model", USE_GPU ? " (GPU)" : "", "...")
+tee("#"^60)
 aff = BoltzGen.load_boltz2(; affinity=true, gpu=USE_GPU)
-println("Loaded: ", aff)
+tee("Loaded: ", aff)
 
 # Warmup: compile affinity fold code paths before timing
-println("\n  Warmup: compiling affinity fold code paths...")
+tee("\n  Warmup: compiling affinity fold code paths...")
 warmup_t = @elapsed begin
     BoltzGen.fold_from_sequence(aff, "GGGGG"; steps=2, recycles=1, seed=1)
 end
-println("  warmup completed in $(round(warmup_t; digits=1))s")
+tee("  warmup completed in $(round(warmup_t; digits=1))s")
 if USE_GPU; CUDA.synchronize(); end
 
 # Case 05: Fold sequence with affinity (GGGGGGGGGGGGGG)
@@ -268,7 +282,7 @@ run_case("case05_fold_sequence_affinity") do
     check_bonds(result)
     check_string_outputs(result)
     metrics = BoltzGen.confidence_metrics(result)
-    println("  affinity metrics: ", pairs(metrics))
+    tee("  affinity metrics: ", pairs(metrics))
 end
 
 # Case 06: Fold from structure with affinity (uses case03 output)
@@ -282,11 +296,11 @@ run_case("case06_fold_structure_affinity") do
     check_bonds(result)
     check_string_outputs(result)
     metrics = BoltzGen.confidence_metrics(result)
-    println("  affinity metrics: ", pairs(metrics))
+    tee("  affinity metrics: ", pairs(metrics))
 end
 
 # Release boltz2 aff model
-println("\nReleasing Boltz2 affinity model...")
+tee("\nReleasing Boltz2 affinity model...")
 aff = nothing
 GC.gc()
 if USE_GPU
@@ -295,31 +309,34 @@ end
 
 # ── Summary ─────────────────────────────────────────────────────────────────────
 
-println("\n", "="^60)
-println("  REPL API TEST SUMMARY", USE_GPU ? " (GPU)" : " (CPU)")
-println("="^60)
+tee("\n", "="^60)
+tee("  REPL API TEST SUMMARY", USE_GPU ? " (GPU)" : " (CPU)")
+tee("="^60)
 n_pass = count(r -> r[2] == :PASS, results)
 n_fail = count(r -> r[2] == :FAIL, results)
-println()
-println("  ", rpad("Case", 40), rpad("Status", 8), "Time (s)")
-println("  ", "-"^40, " ", "-"^6, " ", "-"^10)
+tee()
+tee("  ", rpad("Case", 40), rpad("Status", 8), "Time (s)")
+tee("  ", "-"^40, " ", "-"^6, " ", "-"^10)
 for (name, status, detail, elapsed) in results
     if status == :PASS
-        println("  ", rpad(name, 40), rpad("PASS", 8), round(elapsed; digits=2))
+        tee("  ", rpad(name, 40), rpad("PASS", 8), round(elapsed; digits=2))
     else
-        println("  ", rpad(name, 40), rpad("FAIL", 8), "-")
+        tee("  ", rpad(name, 40), rpad("FAIL", 8), "-")
         for line in split(detail, '\n')[1:min(3, end)]
-            println("        ", line)
+            tee("        ", line)
         end
     end
 end
 total_time = sum(r[4] for r in results)
-println()
-println("  Total: ", length(results), "  Pass: ", n_pass, "  Fail: ", n_fail)
-println("  Total time (post-warmup): $(round(total_time; digits=2))s")
-println("  Device: ", USE_GPU ? "GPU" : "CPU")
-println("  Output directory: ", OUT)
-println("="^60)
+tee()
+tee("  Total: ", length(results), "  Pass: ", n_pass, "  Fail: ", n_fail)
+tee("  Total time (post-warmup): $(round(total_time; digits=2))s")
+tee("  Device: ", USE_GPU ? "GPU" : "CPU")
+tee("  Output directory: ", OUT)
+tee("  Log file: ", LOG_FILE)
+tee("="^60)
+
+close(LOG_IO)
 
 if n_fail > 0
     error("$(n_fail) test case(s) failed.")

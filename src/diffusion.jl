@@ -314,7 +314,8 @@ function sample_schedule_af3(ad::AtomDiffusion, num_sampling_steps=nothing)
     return Float32.(sigmas)
 end
 
-function sample_schedule_dilated(ad::AtomDiffusion, num_sampling_steps=nothing)
+function sample_schedule_dilated(ad::AtomDiffusion, num_sampling_steps=nothing;
+        time_dilation=ad.time_dilation, time_dilation_start=ad.time_dilation_start, time_dilation_end=ad.time_dilation_end)
     num_sampling_steps = default(num_sampling_steps, ad.num_sampling_steps)
     inv_rho = 1f0 / ad.rho
     steps = collect(0:num_sampling_steps-1)
@@ -338,7 +339,7 @@ function sample_schedule_dilated(ad::AtomDiffusion, num_sampling_steps=nothing)
         return (ts .< lprime) .* lower_third .+ ((ts .>= lprime) .& (ts .< lprime + xprime)) .* middle_third .+ (ts .>= lprime + xprime) .* upper_third
     end
 
-    dilated_ts = dilate(ts, ad.time_dilation_start, ad.time_dilation_end, ad.time_dilation)
+    dilated_ts = dilate(ts, time_dilation_start, time_dilation_end, time_dilation)
     sigmas = (ad.sigma_max^inv_rho .+ dilated_ts .* (ad.sigma_min^inv_rho - ad.sigma_max^inv_rho)).^ad.rho
     sigmas = sigmas .* ad.sigma_data
     sigmas = vcat(sigmas, 0f0)
@@ -357,7 +358,7 @@ function beta_step_scale_schedule(ad::AtomDiffusion, num_sampling_steps)
     return Float32.(ad.min_step_scale .+ (ad.max_step_scale - ad.min_step_scale) .* beta_weights)
 end
 
-function sample(ad::AtomDiffusion; atom_mask, num_sampling_steps=nothing, multiplicity::Int=1, step_scale=nothing, noise_scale=nothing, atom_coords_init=nothing, inference_logging::Bool=false, network_condition_kwargs...)
+function sample(ad::AtomDiffusion; atom_mask, num_sampling_steps=nothing, multiplicity::Int=1, step_scale=nothing, noise_scale=nothing, sampling_schedule=nothing, time_dilation=nothing, time_dilation_start=nothing, time_dilation_end=nothing, atom_coords_init=nothing, inference_logging::Bool=false, network_condition_kwargs...)
     num_sampling_steps = default(num_sampling_steps, ad.num_sampling_steps)
 
     if Onion.bg_istraining() && ad.step_scale_random !== nothing
@@ -383,12 +384,18 @@ function sample(ad::AtomDiffusion; atom_mask, num_sampling_steps=nothing, multip
     atom_mask_rep = repeat_interleave_batch(atom_mask, multiplicity)
     shape = (3, size(atom_mask_rep,1), size(atom_mask_rep,2))
 
-    if ad.sampling_schedule == "af3"
+    eff_schedule = default(sampling_schedule, ad.sampling_schedule)
+    if eff_schedule == "af3"
         sigmas = sample_schedule_af3(ad, num_sampling_steps)
-    elseif ad.sampling_schedule == "dilated"
-        sigmas = sample_schedule_dilated(ad, num_sampling_steps)
+    elseif eff_schedule == "dilated"
+        # Use caller-provided dilation params if given, else struct defaults
+        eff_td = Float32(default(time_dilation, ad.time_dilation))
+        eff_tds = Float32(default(time_dilation_start, ad.time_dilation_start))
+        eff_tde = Float32(default(time_dilation_end, ad.time_dilation_end))
+        sigmas = sample_schedule_dilated(ad, num_sampling_steps;
+            time_dilation=eff_td, time_dilation_start=eff_tds, time_dilation_end=eff_tde)
     else
-        error("Invalid sampling schedule: $(ad.sampling_schedule)")
+        error("Invalid sampling schedule: $(eff_schedule)")
     end
     gammas = ifelse.(sigmas .> ad.gamma_min, ad.gamma_0, 0f0)
 
