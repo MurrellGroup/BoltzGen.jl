@@ -207,6 +207,22 @@ function _run_forward(handle::BoltzGenHandle, feats::Dict, feats_masked::Dict;
     return result
 end
 
+# ── MSA helper ─────────────────────────────────────────────────────────────────
+
+"""Resolve MSA from file path or explicit sequences. Returns Vector{String} or nothing."""
+function _resolve_msa(
+    msa_file::Union{Nothing,AbstractString},
+    msa_sequences::Union{Nothing,Vector{String}},
+    max_msa_rows::Union{Nothing,Int},
+)
+    msa_file !== nothing && msa_sequences !== nothing && error(
+        "Provide either msa_file or msa_sequences, not both")
+    if msa_file !== nothing
+        return load_msa_sequences(msa_file; max_rows=max_msa_rows)
+    end
+    return msa_sequences
+end
+
 # ── design_from_sequence ────────────────────────────────────────────────────────
 
 """
@@ -214,6 +230,8 @@ end
 
 Maps to `run_design_from_sequence.jl`. Provide either a non-empty `sequence` or `length > 0`
 for de novo design.
+
+MSA can be provided via `msa_file` (path to FASTA/A3M) or `msa_sequences` (Vector{String}).
 """
 function design_from_sequence(
     handle::BoltzGenHandle,
@@ -225,6 +243,9 @@ function design_from_sequence(
     recycles::Int=3,
     seed::Union{Nothing,Int}=nothing,
     cyclic::Bool=false,
+    msa_file::Union{Nothing,AbstractString}=nothing,
+    msa_sequences::Union{Nothing,Vector{String}}=nothing,
+    max_msa_rows::Union{Nothing,Int}=nothing,
 )
     _validate_design_handle(handle)
     seed !== nothing && Random.seed!(seed)
@@ -258,11 +279,15 @@ function design_from_sequence(
     mol_types = fill(mol_type_id, T)
     cyclic_period = cyclic ? fill(T, T) : zeros(Int, T)
 
+    msa_seqs = _resolve_msa(msa_file, msa_sequences, max_msa_rows)
+
     feats = build_design_features(
         residues;
         mol_types=mol_types,
         cyclic_period=cyclic_period,
         design_mask=dm,
+        msa_sequences=msa_seqs,
+        max_msa_rows=max_msa_rows,
         batch=1,
     )
 
@@ -329,7 +354,10 @@ end
 """
     fold_from_sequence(handle, sequence; steps=100, recycles=3, seed=nothing) → Dict
 
-Maps to `run_fold_from_sequence.jl`. Requires a Boltz2 handle (from `load_boltz2()`).
+Fold a single-chain sequence. Requires a Boltz2 handle (from `load_boltz2()`).
+For multi-chain folding, use `fold_from_sequences`.
+
+MSA can be provided via `msa_file` (path to FASTA/A3M) or `msa_sequences` (Vector{String}).
 """
 function fold_from_sequence(
     handle::BoltzGenHandle,
@@ -338,6 +366,9 @@ function fold_from_sequence(
     steps::Int=100,
     recycles::Int=3,
     seed::Union{Nothing,Int}=nothing,
+    msa_file::Union{Nothing,AbstractString}=nothing,
+    msa_sequences::Union{Nothing,Vector{String}}=nothing,
+    max_msa_rows::Union{Nothing,Int}=nothing,
 )
     _validate_fold_handle(handle)
     seed !== nothing && Random.seed!(seed)
@@ -350,11 +381,109 @@ function fold_from_sequence(
     cyclic_period = zeros(Int, T)
     dm = falses(T)
 
+    msa_seqs = _resolve_msa(msa_file, msa_sequences, max_msa_rows)
+
     feats = build_design_features(
         residues;
         mol_types=mol_types,
         cyclic_period=cyclic_period,
         design_mask=dm,
+        msa_sequences=msa_seqs,
+        max_msa_rows=max_msa_rows,
+        batch=1,
+    )
+
+    feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)
+    return _run_forward(handle, feats, feats_masked; steps=steps, recycles=recycles, batch=1)
+end
+
+# ── fold_from_sequences (multi-chain) ─────────────────────────────────────────
+
+"""
+    fold_from_sequences(handle, sequences; steps=100, recycles=3, seed=nothing) → Dict
+
+Fold a multi-chain complex from multiple sequences. Each element of `sequences` becomes
+a separate chain with its own `asym_id` and `entity_id`.
+
+# Arguments
+- `sequences`: Vector of amino acid sequences, one per chain
+- `chain_types`: Vector of chain types (default: all "PROTEIN"). Must match length of `sequences`.
+
+# Example
+```julia
+fold = BoltzGen.load_boltz2(; gpu=true)
+
+# Antibody VH + VL
+result = BoltzGen.fold_from_sequences(fold, [vh_seq, vl_seq]; steps=200, seed=7)
+
+# 6-chain complex
+result = BoltzGen.fold_from_sequences(fold, [s1, s2, s3, s4, s5, s6]; steps=200)
+```
+"""
+function fold_from_sequences(
+    handle::BoltzGenHandle,
+    sequences::Vector{<:AbstractString};
+    chain_types::Union{Nothing,Vector{String}}=nothing,
+    steps::Int=100,
+    recycles::Int=3,
+    seed::Union{Nothing,Int}=nothing,
+    msa_file::Union{Nothing,AbstractString}=nothing,
+    msa_sequences::Union{Nothing,Vector{String}}=nothing,
+    max_msa_rows::Union{Nothing,Int}=nothing,
+)
+    _validate_fold_handle(handle)
+    seed !== nothing && Random.seed!(seed)
+
+    n_chains = Base.length(sequences)
+    n_chains > 0 || error("sequences must be non-empty")
+
+    ctypes = if chain_types !== nothing
+        Base.length(chain_types) == n_chains || error(
+            "chain_types length ($(Base.length(chain_types))) must match sequences length ($n_chains)")
+        chain_types
+    else
+        fill("PROTEIN", n_chains)
+    end
+
+    # Build concatenated token stream with proper chain IDs
+    residues = String[]
+    mol_types = Int[]
+    asym_ids = Int[]
+    entity_ids = Int[]
+    sym_ids = Int[]
+    residue_indices = Int[]
+
+    for (chain_idx, (seq, ct)) in enumerate(zip(sequences, ctypes))
+        toks = tokens_from_sequence(seq; chain_type=ct)
+        mol_id = chain_type_ids[ct]
+        asym = chain_idx - 1  # 0-based chain ID
+        for (i, tok) in enumerate(toks)
+            push!(residues, tok)
+            push!(mol_types, mol_id)
+            push!(asym_ids, asym)
+            push!(entity_ids, asym)
+            push!(sym_ids, 0)
+            push!(residue_indices, i - 1)  # 0-based per chain
+        end
+    end
+
+    T = Base.length(residues)
+    dm = falses(T)
+    cyclic_period = zeros(Int, T)
+
+    msa_seqs = _resolve_msa(msa_file, msa_sequences, max_msa_rows)
+
+    feats = build_design_features(
+        residues;
+        mol_types=mol_types,
+        asym_ids=asym_ids,
+        entity_ids=entity_ids,
+        sym_ids=sym_ids,
+        cyclic_period=cyclic_period,
+        residue_indices=residue_indices,
+        design_mask=dm,
+        msa_sequences=msa_seqs,
+        max_msa_rows=max_msa_rows,
         batch=1,
     )
 
@@ -368,6 +497,8 @@ end
     fold_from_structure(handle, target_path; steps=100, recycles=3, seed=nothing, ...) → Dict
 
 Maps to `run_fold_from_structure.jl`. Requires a Boltz2 handle.
+
+MSA can be provided via `msa_file` (path to FASTA/A3M) or `msa_sequences` (Vector{String}).
 """
 function fold_from_structure(
     handle::BoltzGenHandle,
@@ -377,6 +508,9 @@ function fold_from_structure(
     steps::Int=100,
     recycles::Int=3,
     seed::Union{Nothing,Int}=nothing,
+    msa_file::Union{Nothing,AbstractString}=nothing,
+    msa_sequences::Union{Nothing,Vector{String}}=nothing,
+    max_msa_rows::Union{Nothing,Int}=nothing,
 )
     _validate_fold_handle(handle)
     seed !== nothing && Random.seed!(seed)
@@ -397,6 +531,8 @@ function fold_from_structure(
         falses(T)
     end
 
+    msa_seqs = _resolve_msa(msa_file, msa_sequences, max_msa_rows)
+
     feats = build_design_features(
         parsed.residue_tokens;
         mol_types=parsed.mol_types,
@@ -408,6 +544,8 @@ function fold_from_structure(
         design_mask=design_mask,
         structure_group=structure_group,
         affinity_token_mask=affinity_token_mask,
+        msa_sequences=msa_seqs,
+        max_msa_rows=max_msa_rows,
         batch=1,
         token_atom_names_override=parsed.token_atom_names,
         token_atom_coords_override=parsed.token_atom_coords,
