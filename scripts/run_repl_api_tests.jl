@@ -42,19 +42,19 @@ const YAML_DIR = normpath(joinpath(@__DIR__, "..", "examples"))
 
 # ── Test runner bookkeeping ─────────────────────────────────────────────────────
 
-const results = Tuple{String,Symbol,String}[]  # (name, :PASS/:FAIL, detail)
+const results = Tuple{String,Symbol,String,Float64}[]  # (name, :PASS/:FAIL, detail, elapsed_s)
 
 function run_case(f::Function, name::String)
     println("\n", "="^60)
     println("  CASE: ", name)
     println("="^60)
     try
-        f()
-        push!(results, (name, :PASS, ""))
-        println("[PASS] ", name)
+        elapsed = @elapsed f()
+        push!(results, (name, :PASS, "", elapsed))
+        println("[PASS] ", name, " ($(round(elapsed; digits=2))s)")
     catch e
         msg = sprint(showerror, e, catch_backtrace())
-        push!(results, (name, :FAIL, msg))
+        push!(results, (name, :FAIL, msg, 0.0))
         println("[FAIL] ", name, ": ", msg)
     end
 end
@@ -89,9 +89,17 @@ println("#"^60)
 gen = BoltzGen.load_boltzgen(; gpu=USE_GPU)
 println("Loaded: ", gen)
 
+# Warmup: compile all code paths before timing
+println("\n  Warmup: compiling design code paths...")
+warmup_t = @elapsed begin
+    BoltzGen.design_from_sequence(gen, ""; length=5, steps=2, recycles=1, seed=1)
+end
+println("  warmup completed in $(round(warmup_t; digits=1))s")
+if USE_GPU; CUDA.synchronize(); end
+
 # Case 01: Design protein only (de novo, length=12)
 run_case("case01_design_protein_only") do
-    result = BoltzGen.design_from_sequence(gen, ""; length=12, steps=20, recycles=2, seed=7)
+    result = BoltzGen.design_from_sequence(gen, ""; length=12, steps=200, recycles=2, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case01_design_protein_only"))
     check_geometry(result; label="atom14")
     # Also check the written atom37 PDB via file-based geometry
@@ -102,7 +110,7 @@ end
 # Case 02: Design protein + small molecule (chorismite.yaml)
 run_case("case02_design_protein_small_molecule") do
     yaml = joinpath(YAML_DIR, "protein_binding_small_molecule", "chorismite.yaml")
-    result = BoltzGen.design_from_yaml(gen, yaml; steps=20, recycles=2, seed=7)
+    result = BoltzGen.design_from_yaml(gen, yaml; steps=200, recycles=2, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case02_design_protein_small_molecule"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
@@ -112,7 +120,7 @@ end
 # Case 03: Design protein + DNA + SMILES (mixed yaml)
 run_case("case03_design_protein_dna_smiles") do
     yaml = joinpath(YAML_DIR, "mixed_protein_dna_smiles_smoke_v1.yaml")
-    result = BoltzGen.design_from_yaml(gen, yaml; steps=20, recycles=2, seed=7)
+    result = BoltzGen.design_from_yaml(gen, yaml; steps=200, recycles=2, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case03_design_protein_dna_smiles"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
@@ -123,7 +131,7 @@ end
 run_case("case07_target_conditioned_design") do
     target_pdb = joinpath(OUT, "case01_design_protein_only_atom14.pdb")
     isfile(target_pdb) || error("case01 PDB not found at $target_pdb (did case01 fail?)")
-    result = BoltzGen.target_conditioned_design(gen, target_pdb; design_length=8, steps=20, recycles=2, seed=7)
+    result = BoltzGen.target_conditioned_design(gen, target_pdb; design_length=8, steps=200, recycles=2, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case07_target_conditioned_design"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
@@ -146,9 +154,17 @@ println("#"^60)
 fold = BoltzGen.load_boltz2(; affinity=false, gpu=USE_GPU)
 println("Loaded: ", fold)
 
+# Warmup: compile fold code paths before timing
+println("\n  Warmup: compiling fold code paths...")
+warmup_t = @elapsed begin
+    BoltzGen.fold_from_sequence(fold, "GGGGG"; steps=2, recycles=1, seed=1)
+end
+println("  warmup completed in $(round(warmup_t; digits=1))s")
+if USE_GPU; CUDA.synchronize(); end
+
 # Case 04: Fold sequence with confidence (GGGGGGGGGGGGGG)
 run_case("case04_fold_sequence_confidence") do
-    result = BoltzGen.fold_from_sequence(fold, "GGGGGGGGGGGGGG"; steps=20, recycles=2, seed=7)
+    result = BoltzGen.fold_from_sequence(fold, "GGGGGGGGGGGGGG"; steps=200, recycles=3, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case04_fold_sequence_confidence"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
@@ -164,13 +180,48 @@ end
 run_case("case_antibody_fold") do
     # Trastuzumab VH (Herceptin) — 121 residues
     vh_seq = "EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS"
-    result = BoltzGen.fold_from_sequence(fold, vh_seq; steps=200, recycles=2, seed=7)
+    result = BoltzGen.fold_from_sequence(fold, vh_seq; steps=2000, recycles=3, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case_antibody_fold"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
     check_string_outputs(result)
     metrics = BoltzGen.confidence_metrics(result)
     println("  confidence metrics: ", pairs(metrics))
+end
+
+# Case MSA: Fold lysozyme (HEWL, 129 residues) with 100-sequence real MSA
+run_case("case_msa_lysozyme_fold") do
+    # Hen egg-white lysozyme mature sequence (UniProt P00698, 129 residues)
+    hewl_seq = "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL"
+    msa_file = joinpath(YAML_DIR, "lysozyme_msa.fasta")
+    isfile(msa_file) || error("MSA file not found at $msa_file")
+
+    # Also run without MSA for timing comparison
+    println("  Folding WITHOUT MSA...")
+    t_no_msa = @elapsed begin
+        result_no_msa = BoltzGen.fold_from_sequence(fold, hewl_seq; steps=2000, recycles=3, seed=7)
+    end
+    if USE_GPU; CUDA.synchronize(); end
+    BoltzGen.write_outputs(result_no_msa, joinpath(OUT, "case_msa_lysozyme_no_msa"))
+    check_geometry(result_no_msa; label="no_msa")
+    metrics_no = BoltzGen.confidence_metrics(result_no_msa)
+    println("  no-MSA: pTM=$(round(metrics_no.ptm[1]; digits=3)), time=$(round(t_no_msa; digits=2))s")
+
+    println("  Folding WITH MSA (100 sequences)...")
+    t_msa = @elapsed begin
+        result_msa = BoltzGen.fold_from_sequence(fold, hewl_seq;
+            steps=2000, recycles=3, seed=7, msa_file=msa_file, max_msa_rows=100)
+    end
+    if USE_GPU; CUDA.synchronize(); end
+    BoltzGen.write_outputs(result_msa, joinpath(OUT, "case_msa_lysozyme_with_msa"))
+    check_geometry(result_msa; label="with_msa")
+    metrics_msa = BoltzGen.confidence_metrics(result_msa)
+    println("  with-MSA: pTM=$(round(metrics_msa.ptm[1]; digits=3)), time=$(round(t_msa; digits=2))s")
+
+    println("\n  MSA timing comparison:")
+    println("    without MSA (S=1):   $(round(t_no_msa; digits=2))s")
+    println("    with MSA (S=100):    $(round(t_msa; digits=2))s")
+    println("    ratio: $(round(t_msa / t_no_msa; digits=2))x")
 end
 
 # Release boltz2 conf model
@@ -189,9 +240,17 @@ println("#"^60)
 aff = BoltzGen.load_boltz2(; affinity=true, gpu=USE_GPU)
 println("Loaded: ", aff)
 
+# Warmup: compile affinity fold code paths before timing
+println("\n  Warmup: compiling affinity fold code paths...")
+warmup_t = @elapsed begin
+    BoltzGen.fold_from_sequence(aff, "GGGGG"; steps=2, recycles=1, seed=1)
+end
+println("  warmup completed in $(round(warmup_t; digits=1))s")
+if USE_GPU; CUDA.synchronize(); end
+
 # Case 05: Fold sequence with affinity (GGGGGGGGGGGGGG)
 run_case("case05_fold_sequence_affinity") do
-    result = BoltzGen.fold_from_sequence(aff, "GGGGGGGGGGGGGG"; steps=20, recycles=2, seed=7)
+    result = BoltzGen.fold_from_sequence(aff, "GGGGGGGGGGGGGG"; steps=200, recycles=3, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case05_fold_sequence_affinity"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
@@ -204,7 +263,7 @@ end
 run_case("case06_fold_structure_affinity") do
     target_pdb = joinpath(OUT, "case03_design_protein_dna_smiles_atom14.pdb")
     isfile(target_pdb) || error("case03 PDB not found at $target_pdb (did case03 fail?)")
-    result = BoltzGen.fold_from_structure(aff, target_pdb; steps=20, recycles=2, seed=7)
+    result = BoltzGen.fold_from_structure(aff, target_pdb; steps=200, recycles=3, seed=7)
     BoltzGen.write_outputs(result, joinpath(OUT, "case06_fold_structure_affinity"))
     check_geometry(result; label="atom14")
     check_geometry(result; label="atom37")
@@ -228,18 +287,23 @@ println("  REPL API TEST SUMMARY", USE_GPU ? " (GPU)" : " (CPU)")
 println("="^60)
 n_pass = count(r -> r[2] == :PASS, results)
 n_fail = count(r -> r[2] == :FAIL, results)
-for (name, status, detail) in results
+println()
+println("  ", rpad("Case", 40), rpad("Status", 8), "Time (s)")
+println("  ", "-"^40, " ", "-"^6, " ", "-"^10)
+for (name, status, detail, elapsed) in results
     if status == :PASS
-        println("  PASS  ", name)
+        println("  ", rpad(name, 40), rpad("PASS", 8), round(elapsed; digits=2))
     else
-        println("  FAIL  ", name)
+        println("  ", rpad(name, 40), rpad("FAIL", 8), "-")
         for line in split(detail, '\n')[1:min(3, end)]
             println("        ", line)
         end
     end
 end
+total_time = sum(r[4] for r in results)
 println()
 println("  Total: ", length(results), "  Pass: ", n_pass, "  Fail: ", n_fail)
+println("  Total time (post-warmup): $(round(total_time; digits=2))s")
 println("  Device: ", USE_GPU ? "GPU" : "CPU")
 println("  Output directory: ", OUT)
 println("="^60)
