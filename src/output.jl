@@ -193,6 +193,8 @@ function write_pdb(io::IO, feats::Dict, coords; batch::Int=1)
     M = size(coords_b, 2)
     skipped = 0
     clipped = 0
+    # Track token_idx for each written atom serial (for CONECT records)
+    written_entries = NamedTuple{(:token_idx,),Tuple{Int}}[]
     for m in 1:M
         atom_pad_mask[m] > 0.5 || continue
         token_idx = argmax(view(atom_to_token, m, :))
@@ -236,8 +238,10 @@ function write_pdb(io::IO, feats::Dict, coords; batch::Int=1)
             0.00,
             element,
         )
+        push!(written_entries, (token_idx=token_idx,))
         atom_serial += 1
     end
+    _write_conect_records(io, written_entries, feats; batch=batch)
     if skipped > 0
         @printf(io, "REMARK Skipped %d atoms due to padding/NaNs\n", skipped)
     end
@@ -308,8 +312,12 @@ function collect_atom37_entries(feats::Dict, coords; batch::Int=1)
         amap = token_atom_map[t]
         emap = token_atom_element[t]
 
-        ordered_atom_names = if Int(mol_type[t]) == chain_type_ids["PROTEIN"]
+        ordered_atom_names = if mt == chain_type_ids["PROTEIN"]
             atom_types
+        elseif mt == chain_type_ids["NONPOLYMER"]
+            # For NONPOLYMER: use CCD-specific atom ordering if available,
+            # otherwise use actual atom names (e.g. SMILES ligands with res_name="UNK")
+            (res_name != "UNK" && haskey(ref_atoms, res_name)) ? ref_atoms[res_name] : collect(keys(amap))
         else
             get(ref_atoms, res_name, collect(keys(amap)))
         end
@@ -327,12 +335,66 @@ function collect_atom37_entries(feats::Dict, coords; batch::Int=1)
                     y=xyz[2],
                     z=xyz[3],
                     element=get(emap, atom_name, _element_from_atom_name(atom_name)),
+                    token_idx=t,
                 ))
             end
         end
     end
 
     return entries
+end
+
+function _write_conect_records(io::IO, entries, feats::Dict; batch::Int=1)
+    haskey(feats, "token_bonds") || return 0
+    token_bonds = feats["token_bonds"]
+    ndims(token_bonds) >= 3 || return 0
+    T = size(token_bonds, 2)
+
+    # Build token_idx → atom serial mapping (first atom per token in the entry list)
+    token_to_serial = Dict{Int,Int}()
+    for (serial, e) in enumerate(entries)
+        if !haskey(token_to_serial, e.token_idx)
+            token_to_serial[e.token_idx] = serial
+        end
+    end
+
+    # Collect adjacency: for each atom serial, list of bonded atom serials
+    adjacency = Dict{Int,Vector{Int}}()
+    b = min(batch, size(token_bonds, ndims(token_bonds)))
+    for t1 in 1:T
+        for t2 in (t1+1):T
+            # token_bonds shape: (1, T, T, B) from features.jl
+            val = if ndims(token_bonds) == 4
+                token_bonds[1, t1, t2, b]
+            elseif ndims(token_bonds) == 3
+                token_bonds[1, t1, t2]
+            else
+                token_bonds[t1, t2]
+            end
+            (val > 0.5) || continue
+            s1 = get(token_to_serial, t1, 0)
+            s2 = get(token_to_serial, t2, 0)
+            (s1 > 0 && s2 > 0) || continue
+            push!(get!(adjacency, s1, Int[]), s2)
+            push!(get!(adjacency, s2, Int[]), s1)
+        end
+    end
+
+    n_conect = 0
+    for serial in sort(collect(keys(adjacency)))
+        partners = sort(adjacency[serial])
+        # PDB CONECT format: up to 4 partners per line
+        for chunk_start in 1:4:length(partners)
+            chunk_end = min(chunk_start + 3, length(partners))
+            @printf(io, "CONECT%5d", serial)
+            for k in chunk_start:chunk_end
+                @printf(io, "%5d", partners[k])
+            end
+            println(io)
+            n_conect += 1
+        end
+    end
+    return n_conect
 end
 
 function write_pdb_atom37(io::IO, feats::Dict, coords; batch::Int=1)
@@ -362,6 +424,7 @@ function write_pdb_atom37(io::IO, feats::Dict, coords; batch::Int=1)
             e.element,
         )
     end
+    _write_conect_records(io, entries, feats; batch=batch)
     if clipped > 0
         @printf(io, "REMARK Clipped %d coordinates to PDB range [%.3f, %.3f]\n", clipped, PDB_COORD_MIN, PDB_COORD_MAX)
     end

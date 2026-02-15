@@ -304,6 +304,12 @@ function main()
     coords = out["sample_atom_coords"]
     feats_out = BoltzGen.postprocess_atom14(feats_masked, coords)
 
+    # Restore token_bonds from original feats (masker zeros them for model input,
+    # but we need the original bonds for PDB CONECT records in the output)
+    if haskey(feats, "token_bonds")
+        feats_out["token_bonds"] = feats["token_bonds"]
+    end
+
     # Keep fixed target atoms and residue identities unchanged.
     atom_to_token = feats_masked["atom_to_token"][:, :, 1]
     atom_pad_mask = feats_masked["atom_pad_mask"][:, 1]

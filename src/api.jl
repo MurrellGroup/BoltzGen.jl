@@ -208,6 +208,12 @@ function _run_forward(handle::BoltzGenHandle, feats::Dict, feats_masked::Dict;
     feats_out = postprocess_atom14(feats_fwd_cpu, coords)
     _restore_fixed_tokens!(feats_out, feats; batch=batch)
 
+    # Restore token_bonds from original feats (masker zeros them for model input,
+    # but we need the original bonds for PDB CONECT records in the output)
+    if haskey(feats, "token_bonds")
+        feats_out["token_bonds"] = feats["token_bonds"]
+    end
+
     # Build result with all arrays on CPU
     result = _dict_to_cpu(out)
     result["feats"] = feats_out
