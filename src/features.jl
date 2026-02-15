@@ -2024,6 +2024,10 @@ function load_structure_tokens(
     entity_ids = copy(asym_ids)
     sym_ids = zeros(Int, length(asym_ids))
 
+    # Deduplicate entity_ids by sequence (matching Python behavior).
+    # Defined in yaml_parser.jl, available at runtime in the same module.
+    _deduplicate_entity_ids!(entity_ids, asym_ids, residue_tokens, mol_types)
+
     reskey_to_token = Dict{Tuple{String, Int, String}, Int}()
     for i in eachindex(token_res_keys)
         k = token_res_keys[i]

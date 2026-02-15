@@ -30,6 +30,48 @@ function _upper(x)
     return uppercase(strip(string(x)))
 end
 
+"""
+Deduplicate entity_ids by residue token sequence, matching Python's
+Structure.concatenate() behavior (data.py:432). Chains with identical
+residue name sequences get the same entity_id.
+"""
+function _deduplicate_entity_ids!(entity_ids::Vector{Int}, asym_ids::Vector{Int},
+                                   residue_tokens::Vector{String}, mol_types::Vector{Int})
+    T = length(entity_ids)
+    T == 0 && return
+
+    # Group token indices by asym_id, preserving order of first appearance.
+    chain_order = Int[]
+    chain_token_idxs = Dict{Int,Vector{Int}}()
+    for i in 1:T
+        aid = asym_ids[i]
+        if !haskey(chain_token_idxs, aid)
+            push!(chain_order, aid)
+            chain_token_idxs[aid] = Int[]
+        end
+        push!(chain_token_idxs[aid], i)
+    end
+
+    # Build sequence key per chain: joined residue token names.
+    # For NONPOLYMER (atomized) tokens, use the single token name.
+    seq_to_entity = Dict{String,Int}()
+    next_entity = 0
+    for aid in chain_order
+        idxs = chain_token_idxs[aid]
+        seq_key = join(residue_tokens[idxs], "\0")
+        if haskey(seq_to_entity, seq_key)
+            eid = seq_to_entity[seq_key]
+        else
+            eid = next_entity
+            seq_to_entity[seq_key] = eid
+            next_entity += 1
+        end
+        for i in idxs
+            entity_ids[i] = eid
+        end
+    end
+end
+
 function _make_sampling_state(sampling_plan)
     if sampling_plan === nothing
         return (mode=:none, decisions=Any[], idx=Ref(1))
@@ -2010,6 +2052,10 @@ function parse_design_yaml(
             remaining = length(sampling_state.decisions) - sampling_state.idx[] + 1
             error("Sampling plan has unused decisions after parse completion: $(remaining)")
         end
+
+        # Deduplicate entity_ids by sequence (matching Python behavior).
+        # Chains with identical residue token sequences get the same entity_id.
+        _deduplicate_entity_ids!(entity_ids, asym_ids, residue_tokens, mol_types)
 
         return (
             residue_tokens=residue_tokens,
