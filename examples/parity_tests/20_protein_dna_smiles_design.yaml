@@ -1,0 +1,10 @@
+entities:
+  - protein:
+      id: A
+      sequence: 10
+  - dna:
+      id: B
+      sequence: ACGTACGT
+  - ligand:
+      id: C
+      smiles: "CC(=O)OC1=CC=CC=C1C(=O)O"

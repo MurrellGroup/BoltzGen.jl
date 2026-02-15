@@ -1,0 +1,7 @@
+entities:
+  - protein:
+      id: A
+      sequence: ACDEFGHIKLM
+  - ligand:
+      id: B
+      ccd: TSA

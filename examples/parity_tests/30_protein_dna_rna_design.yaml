@@ -1,0 +1,10 @@
+entities:
+  - protein:
+      id: A
+      sequence: 10
+  - dna:
+      id: B
+      sequence: ACGTACGT
+  - rna:
+      id: C
+      sequence: AUGCAUGC

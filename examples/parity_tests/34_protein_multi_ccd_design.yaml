@@ -1,0 +1,10 @@
+entities:
+  - protein:
+      id: A
+      sequence: 15
+  - ligand:
+      id: B
+      ccd: GOL
+  - ligand:
+      id: C
+      ccd: EDO

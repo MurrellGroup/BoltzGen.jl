@@ -234,6 +234,7 @@ function _atomize_smiles_ligand_tokens(
     acoords = Vector{Dict{String,NTuple{3,Float32}}}()
     parent_idx = Int[]
     residue_start = Int[]
+    accd_codes = String[]
 
     for i in eachindex(toks)
         push!(residue_start, length(atoks) + 1)
@@ -246,6 +247,7 @@ function _atomize_smiles_ligand_tokens(
             push!(anames, [nm])
             push!(acoords, Dict{String,NTuple{3,Float32}}(nm => coords[nm]))
             push!(parent_idx, i)
+            push!(accd_codes, "")
         end
     end
 
@@ -263,7 +265,7 @@ function _atomize_smiles_ligand_tokens(
         end
     end
 
-    return atoks, anames, acoords, parent_idx, abonds
+    return atoks, anames, acoords, parent_idx, abonds, accd_codes
 end
 
 function _atomize_ccd_ligand_tokens(
@@ -277,6 +279,7 @@ function _atomize_ccd_ligand_tokens(
     acoords = Vector{Dict{String,NTuple{3,Float32}}}()
     parent_idx = Int[]
     abonds = NTuple{3,Int}[]
+    accd_codes = String[]
 
     for (res_idx, code_raw) in enumerate(ccd_codes)
         code = _upper(code_raw)
@@ -295,6 +298,7 @@ function _atomize_ccd_ligand_tokens(
             push!(anames, [atom_name])
             push!(acoords, Dict{String,NTuple{3,Float32}}(atom_name => coords[atom_name]))
             push!(parent_idx, res_idx)
+            push!(accd_codes, code)
         end
 
         for (i, j, bt) in local_bonds
@@ -307,7 +311,7 @@ function _atomize_ccd_ligand_tokens(
         end
     end
 
-    return atoks, anames, acoords, parent_idx, abonds
+    return atoks, anames, acoords, parent_idx, abonds, accd_codes
 end
 
 function _atomize_file_nonpolymer_tokens(
@@ -368,6 +372,7 @@ function _atomize_file_nonpolymer_tokens(
     out_cyclic_period = Int[]
     out_msa_paths = Vector{Union{Nothing, String}}()
     out_source_token_indices = Int[]
+    out_token_ccd_codes = String[]
 
     chain_is_all_nonpoly = Dict{String,Bool}()
     for c in chain_labels
@@ -412,6 +417,7 @@ function _atomize_file_nonpolymer_tokens(
                 push!(out_cyclic_period, cyclic_period[t])
                 push!(out_msa_paths, msa_paths[t])
                 push!(out_source_token_indices, t)
+                push!(out_token_ccd_codes, comp)
             end
         else
             push!(out_residue_tokens, residue_tokens[t])
@@ -433,6 +439,7 @@ function _atomize_file_nonpolymer_tokens(
             push!(out_cyclic_period, cyclic_period[t])
             push!(out_msa_paths, msa_paths[t])
             push!(out_source_token_indices, t)
+            push!(out_token_ccd_codes, mol_types[t] == chain_type_ids["NONPOLYMER"] ? _upper(residue_comp_ids[t]) : "")
         end
     end
 
@@ -456,6 +463,7 @@ function _atomize_file_nonpolymer_tokens(
         cyclic_period=out_cyclic_period,
         msa_paths=out_msa_paths,
         source_token_indices=out_source_token_indices,
+        token_ccd_codes=out_token_ccd_codes,
     )
 end
 
@@ -1223,6 +1231,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
     cyclic_period = atomized.cyclic_period
     msa_paths = atomized.msa_paths
     source_token_indices = atomized.source_token_indices
+    token_ccd_codes = atomized.token_ccd_codes
 
     source_to_rep = Dict{Int, Int}()
     for (new_idx, src_idx) in enumerate(source_token_indices)
@@ -1266,6 +1275,7 @@ function _parse_file_entity(spec, base_dir::AbstractString, include_nonpolymer::
         cyclic_period=cyclic_period,
         msa_paths=msa_paths,
         bonds=file_token_bonds,
+        token_ccd_codes=token_ccd_codes,
     )
 end
 
@@ -1373,6 +1383,7 @@ function parse_design_yaml(
         target_msa_mask = Bool[]
         cyclic_period = Int[]
         token_msa_paths = Union{Nothing, String}[]
+        token_ccd_codes = String[]
         bonds = NTuple{3, Int}[]
 
             chain_aliases = Dict{String, Vector{String}}()
@@ -1422,7 +1433,8 @@ function parse_design_yaml(
                 ent_sym_ids,
                 ent_bonds::Vector{NTuple{3,Int}},
                 orig_chain_names::Vector{String},
-                fuse_target::Union{Nothing,String}=nothing,
+                fuse_target::Union{Nothing,String}=nothing;
+                ent_token_ccd_codes::Union{Nothing,Vector{String}}=nothing,
             )
                 length(ent_residue_tokens) == length(ent_mol_types) || error("append_entity!: token/molecule length mismatch")
                 length(ent_residue_tokens) == length(ent_entity_ids) || error("append_entity!: token/entity length mismatch")
@@ -1508,6 +1520,7 @@ function parse_design_yaml(
                     push!(target_msa_mask, ent_target_msa_mask[i])
                     push!(cyclic_period, ent_cyclic_period[i])
                     push!(token_msa_paths, ent_msa_paths[i])
+                    push!(token_ccd_codes, ent_token_ccd_codes === nothing ? "" : ent_token_ccd_codes[i])
                     local_to_global[i] = length(residue_tokens)
                 end
 
@@ -1560,6 +1573,7 @@ function parse_design_yaml(
                     ent_msa_paths = Union{Nothing, String}[]
                     ent_sym_ids = Int[]
                     ent_bonds = NTuple{3,Int}[]
+                    ent_token_ccd_codes = String[]
 
                     mt = chain_type_ids[chain_type]
                     for id_any in ids
@@ -1581,6 +1595,7 @@ function parse_design_yaml(
                         append!(ent_cyclic_period, fill(cyclic_val, n))
                         append!(ent_msa_paths, fill(msa_path, n))
                         append!(ent_sym_ids, fill(sym_group, n))
+                        append!(ent_token_ccd_codes, fill("", n))
                         if cyclic_flag && n > 1
                             cov_bt = get(bond_type_ids, "COVALENT", 1) + 1
                             push!(ent_bonds, (offset + 1, offset + n, cov_bt))
@@ -1606,7 +1621,8 @@ function parse_design_yaml(
                         ent_sym_ids,
                         ent_bonds,
                         [string(x) for x in ids],
-                        fuse_target === nothing ? nothing : string(fuse_target),
+                        fuse_target === nothing ? nothing : string(fuse_target);
+                        ent_token_ccd_codes=ent_token_ccd_codes,
                     )
 
                 elseif _ydict_get(e, "ligand", nothing) !== nothing
@@ -1623,13 +1639,14 @@ function parse_design_yaml(
                     atom_coords_src = Vector{Dict{String,NTuple{3,Float32}}}()
                     atomized_parent_idx = Int[]
                     ligand_internal_bonds_local = NTuple{3,Int}[]
+                    ligand_ccd_codes = String[]
                     if smiles !== nothing
                         smiles_list = [String(strip(string(x))) for x in _as_list(smiles)]
                         lig = smiles_to_ligand_tokens(smiles_list)
                         toks_raw = lig.tokens
                         btype_raw = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), length(toks_raw))
                         sstype_raw = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), length(toks_raw))
-                        toks, atom_names_src, atom_coords_src, atomized_parent_idx, ligand_internal_bonds_local =
+                        toks, atom_names_src, atom_coords_src, atomized_parent_idx, ligand_internal_bonds_local, ligand_ccd_codes =
                             _atomize_smiles_ligand_tokens(toks_raw, lig.token_atom_names, lig.token_atom_coords, lig.token_bonds)
                         btype = [btype_raw[i] for i in atomized_parent_idx]
                         sstype = [sstype_raw[i] for i in atomized_parent_idx]
@@ -1639,7 +1656,7 @@ function parse_design_yaml(
                         isempty(ccds_raw) && error("Ligand CCD list is empty")
                         btype_raw = _parse_binding_spec(_ydict_get(spec, "binding_types", nothing), length(ccds_raw))
                         sstype_raw = _parse_ss_spec(_ydict_get(spec, "secondary_structure", nothing), length(ccds_raw))
-                        toks, atom_names_src, atom_coords_src, atomized_parent_idx, ligand_internal_bonds_local =
+                        toks, atom_names_src, atom_coords_src, atomized_parent_idx, ligand_internal_bonds_local, ligand_ccd_codes =
                             _atomize_ccd_ligand_tokens(ccds_raw; ccd_cache_path=ccd_cache_path)
                         btype = [btype_raw[i] for i in atomized_parent_idx]
                         sstype = [sstype_raw[i] for i in atomized_parent_idx]
@@ -1670,6 +1687,7 @@ function parse_design_yaml(
                     ent_msa_paths = Union{Nothing, String}[]
                     ent_sym_ids = Int[]
                     ent_bonds = NTuple{3,Int}[]
+                    ent_token_ccd_codes = String[]
 
                     mt = chain_type_ids["NONPOLYMER"]
                     for id_any in ids
@@ -1691,6 +1709,7 @@ function parse_design_yaml(
                         append!(ent_cyclic_period, fill(0, n))
                         append!(ent_msa_paths, fill(nothing, n))
                         append!(ent_sym_ids, fill(sym_group, n))
+                        append!(ent_token_ccd_codes, ligand_ccd_codes)
                         for (i, j, bt) in ligand_internal_bonds_local
                             push!(ent_bonds, (offset + i, offset + j, bt))
                         end
@@ -1715,7 +1734,8 @@ function parse_design_yaml(
                         ent_sym_ids,
                         ent_bonds,
                         [string(x) for x in ids],
-                        fuse_target === nothing ? nothing : string(fuse_target),
+                        fuse_target === nothing ? nothing : string(fuse_target);
+                        ent_token_ccd_codes=ent_token_ccd_codes,
                     )
 
                 elseif _ydict_get(e, "file", nothing) !== nothing
@@ -1745,7 +1765,8 @@ function parse_design_yaml(
                         parsed_file.sym_ids,
                         ent_bonds,
                         orig_chain_names,
-                        fuse_target === nothing ? nothing : string(fuse_target),
+                        fuse_target === nothing ? nothing : string(fuse_target);
+                        ent_token_ccd_codes=parsed_file.token_ccd_codes,
                     )
                 else
                     error("Unsupported entity in YAML: $(collect(keys(e)))")
@@ -2014,6 +2035,7 @@ function parse_design_yaml(
             msa_paired_rows=msa_paired_rows,
             msa_has_deletion_rows=msa_has_deletion_rows,
             msa_deletion_value_rows=msa_deletion_value_rows,
+            token_ccd_codes=token_ccd_codes,
         )
     end
 

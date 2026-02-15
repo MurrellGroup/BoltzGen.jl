@@ -1,0 +1,7 @@
+entities:
+  - dna:
+      id: A
+      sequence: ACGTACGTACGT
+  - dna:
+      id: B
+      sequence: ACGTACGTACGT

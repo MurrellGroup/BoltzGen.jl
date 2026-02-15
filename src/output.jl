@@ -68,6 +68,31 @@ function _res_name_from_onehot(res_type_vec)
     return tokens[idx]
 end
 
+function _res_name_for_token(feats::Dict, token_idx::Int, res_type_slice, mol_type_val::Int, batch::Int)
+    # For NONPOLYMER tokens, use the CCD code if available (e.g. "HEM" instead of "UNK")
+    if mol_type_val == chain_type_ids["NONPOLYMER"] && haskey(feats, "token_ccd_codes")
+        codes = feats["token_ccd_codes"]
+        if token_idx <= length(codes) && !isempty(codes[token_idx])
+            return codes[token_idx]
+        end
+    end
+    return _res_name_from_onehot(res_type_slice)
+end
+
+const _ATOMIC_NUM_TO_SYMBOL = Dict{Int,String}(
+    1=>"H", 2=>"He", 3=>"Li", 4=>"Be", 5=>"B", 6=>"C", 7=>"N", 8=>"O",
+    9=>"F", 10=>"Ne", 11=>"Na", 12=>"Mg", 13=>"Al", 14=>"Si", 15=>"P",
+    16=>"S", 17=>"Cl", 18=>"Ar", 19=>"K", 20=>"Ca", 21=>"Sc", 22=>"Ti",
+    23=>"V", 24=>"Cr", 25=>"Mn", 26=>"Fe", 27=>"Co", 28=>"Ni", 29=>"Cu",
+    30=>"Zn", 33=>"As", 34=>"Se", 35=>"Br", 47=>"Ag", 50=>"Sn", 53=>"I",
+    78=>"Pt", 80=>"Hg", 82=>"Pb",
+)
+
+function _element_from_ref_element(ref_element_vec::AbstractVector)
+    z = argmax(ref_element_vec) - 1  # ref_element is 0-indexed (z+1 = index)
+    return get(_ATOMIC_NUM_TO_SYMBOL, z, "X")
+end
+
 function _element_from_atom_name(atom_name::String)
     stripped = replace(atom_name, r"[0-9]" => "")
     stripped = strip(stripped)
@@ -161,6 +186,7 @@ function write_pdb(io::IO, feats::Dict, coords; batch::Int=1)
     atom_pad_mask = feats["atom_pad_mask"][:, batch]
     atom_to_token = feats["atom_to_token"][:, :, batch]
     ref_atom_name_chars = feats["ref_atom_name_chars"][:, :, :, batch]
+    ref_element = feats["ref_element"][:, :, batch]
     res_type, residue_index, asym_id, mol_type, token_pad_mask, res_offset = _token_metadata(feats, batch)
 
     atom_serial = 1
@@ -171,13 +197,14 @@ function write_pdb(io::IO, feats::Dict, coords; batch::Int=1)
         atom_pad_mask[m] > 0.5 || continue
         token_idx = argmax(view(atom_to_token, m, :))
         token_pad_mask[token_idx] > 0.5 || (skipped += 1; continue)
-        res_name = _res_name_from_onehot(view(res_type, :, token_idx))
+        mt = Int(mol_type[token_idx])
+        res_name = _res_name_for_token(feats, token_idx, view(res_type, :, token_idx), mt, batch)
         res_seq = Int(residue_index[token_idx]) + res_offset
         chain_id = chain_id_from_asym(Int(asym_id[token_idx]))
         atom_name = decode_atom_name_chars(view(ref_atom_name_chars, :, :, m))
         _is_fake_or_mask_atom(atom_name) && (skipped += 1; continue)
-        element = _element_from_atom_name(atom_name)
-        record = (Int(mol_type[token_idx]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
+        element = _element_from_ref_element(view(ref_element, :, m))
+        record = (mt == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
 
         x_raw = coords_b[1, m]
         y_raw = coords_b[2, m]
@@ -246,10 +273,12 @@ function collect_atom37_entries(feats::Dict, coords; batch::Int=1)
     atom_pad_mask = feats["atom_pad_mask"][:, batch]
     atom_to_token = feats["atom_to_token"][:, :, batch]
     ref_atom_name_chars = feats["ref_atom_name_chars"][:, :, :, batch]
+    ref_element = feats["ref_element"][:, :, batch]
     res_type, residue_index, asym_id, mol_type, token_pad_mask, res_offset = _token_metadata(feats, batch)
 
     T = size(atom_to_token, 2)
     token_atom_map = [Dict{String,NTuple{3,Float32}}() for _ in 1:T]
+    token_atom_element = [Dict{String,String}() for _ in 1:T]
 
     for m in 1:size(coords_b, 2)
         atom_pad_mask[m] > 0.5 || continue
@@ -265,16 +294,19 @@ function collect_atom37_entries(feats::Dict, coords; batch::Int=1)
         (isfinite(x) && isfinite(y) && isfinite(z)) || continue
 
         token_atom_map[token_idx][atom_name] = (Float32(x), Float32(y), Float32(z))
+        token_atom_element[token_idx][atom_name] = _element_from_ref_element(view(ref_element, :, m))
     end
 
     entries = NamedTuple[]
     for t in 1:T
         token_pad_mask[t] > 0.5 || continue
-        res_name = _res_name_from_onehot(view(res_type, :, t))
+        mt = Int(mol_type[t])
+        res_name = _res_name_for_token(feats, t, view(res_type, :, t), mt, batch)
         res_seq = Int(residue_index[t]) + res_offset
         chain_id = chain_id_from_asym(Int(asym_id[t]))
-        record = (Int(mol_type[t]) == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
+        record = (mt == chain_type_ids["NONPOLYMER"]) ? "HETATM" : "ATOM"
         amap = token_atom_map[t]
+        emap = token_atom_element[t]
 
         ordered_atom_names = if Int(mol_type[t]) == chain_type_ids["PROTEIN"]
             atom_types
@@ -294,7 +326,7 @@ function collect_atom37_entries(feats::Dict, coords; batch::Int=1)
                     x=xyz[1],
                     y=xyz[2],
                     z=xyz[3],
-                    element=_element_from_atom_name(atom_name),
+                    element=get(emap, atom_name, _element_from_atom_name(atom_name)),
                 ))
             end
         end

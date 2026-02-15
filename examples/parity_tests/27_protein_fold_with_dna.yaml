@@ -1,0 +1,7 @@
+entities:
+  - protein:
+      id: A
+      sequence: ACDEFGHIKLM
+  - dna:
+      id: B
+      sequence: ACGTACGT

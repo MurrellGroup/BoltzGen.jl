@@ -191,6 +191,7 @@ function main()
         token_atom_names_override=parsed.token_atom_names,
         token_atom_coords_override=parsed.token_atom_coords,
         token_atom_ref_coords_override=parsed.token_atom_ref_coords,
+        token_ccd_codes=parsed.token_ccd_codes,
     )
 
     feats_masked = BoltzGen.boltz_masker(feats; mask=true, mask_backbone=false)

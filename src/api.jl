@@ -355,6 +355,7 @@ function design_from_yaml(
         token_atom_names_override=parsed.token_atom_names,
         token_atom_coords_override=parsed.token_atom_coords,
         token_atom_ref_coords_override=parsed.token_atom_ref_coords,
+        token_ccd_codes=parsed.token_ccd_codes,
     )
 
     feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)
@@ -567,6 +568,9 @@ function fold_from_structure(
         batch=1,
         token_atom_names_override=parsed.token_atom_names,
         token_atom_coords_override=parsed.token_atom_coords,
+        token_atom_ref_coords_override=isempty(parsed.token_atom_ref_coords) ? nothing : parsed.token_atom_ref_coords,
+        token_ccd_codes=parsed.token_ccd_codes,
+        bonds=parsed.token_bonds,
     )
 
     feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)
@@ -609,6 +613,8 @@ function target_conditioned_design(
     residue_indices = copy(parsed.residue_indices)
     token_atom_names_override = copy(parsed.token_atom_names)
     token_atom_coords_override = copy(parsed.token_atom_coords)
+    token_atom_ref_coords_override = copy(parsed.token_atom_ref_coords)
+    token_ccd_codes = copy(parsed.token_ccd_codes)
 
     T_target = Base.length(residues)
 
@@ -637,6 +643,10 @@ function target_conditioned_design(
             push!(residue_indices, k - 1)
             push!(token_atom_names_override, String[])
             push!(token_atom_coords_override, Dict{String,NTuple{3,Float32}}())
+            if !isempty(token_atom_ref_coords_override)
+                push!(token_atom_ref_coords_override, Dict{String,NTuple{3,Float32}}())
+            end
+            push!(token_ccd_codes, "")
         end
     end
 
@@ -662,6 +672,9 @@ function target_conditioned_design(
         batch=1,
         token_atom_names_override=token_atom_names_override,
         token_atom_coords_override=token_atom_coords_override,
+        token_atom_ref_coords_override=isempty(token_atom_ref_coords_override) ? nothing : token_atom_ref_coords_override,
+        token_ccd_codes=token_ccd_codes,
+        bonds=parsed.token_bonds,
     )
 
     feats_masked = boltz_masker(feats; mask=true, mask_backbone=false)

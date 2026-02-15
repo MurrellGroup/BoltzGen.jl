@@ -1,0 +1,7 @@
+entities:
+  - protein:
+      id: A
+      sequence: 15
+  - ligand:
+      id: B
+      ccd: HEM

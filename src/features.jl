@@ -434,6 +434,7 @@ function build_design_features(
     token_atom_coords_override::Union{Nothing,Vector{Dict{String,NTuple{3,Float32}}}}=nothing,
     token_atom_ref_coords_override::Union{Nothing,Vector{Dict{String,NTuple{3,Float32}}}}=nothing,
     center_coords_override::Union{Nothing,Vector{NTuple{3,Float32}}}=nothing,
+    token_ccd_codes::Union{Nothing,Vector{String}}=nothing,
 )
     T = length(residue_tokens)
     T > 0 || error("residue_tokens cannot be empty")
@@ -472,6 +473,7 @@ function build_design_features(
     token_atom_coords_override === nothing || length(token_atom_coords_override) == T || error("token_atom_coords_override length mismatch")
     token_atom_ref_coords_override === nothing || length(token_atom_ref_coords_override) == T || error("token_atom_ref_coords_override length mismatch")
     center_coords_override === nothing || length(center_coords_override) == T || error("center_coords_override length mismatch")
+    token_ccd_codes === nothing || length(token_ccd_codes) == T || error("token_ccd_codes length mismatch")
 
     if chain_design_mask === nothing
         chain_design_mask_v = _propagate_chain_design_mask(design_mask_v, asym_ids_v, bonds)
@@ -723,6 +725,18 @@ function build_design_features(
                 end
             end
 
+            # Look up CCD cache entry once per token (outside atom loop).
+            # For CCD NONPOLYMER tokens, this is REQUIRED — no heuristic fallback.
+            # SMILES NONPOLYMER tokens have empty CCD codes; their atom names encode
+            # element symbols (e.g. "C1", "N2") so the heuristic is correct for those.
+            _ccd_entry = nothing
+            if is_nonpoly && token_ccd_codes !== nothing && !isempty(token_ccd_codes[t])
+                _ccd_entry = load_ccd_ligand_cache_entry(token_ccd_codes[t])
+            elseif is_nonpoly && token_ccd_codes === nothing
+                error("NONPOLYMER token at index $t (tok='$tok') but token_ccd_codes was not provided. " *
+                      "All code paths with NONPOLYMER tokens must supply token_ccd_codes.")
+            end
+
             for (j, atom_name) in enumerate(atoms)
                 m = offset + j - 1
                 if m > M
@@ -795,14 +809,26 @@ function build_design_features(
                 elseif is_nonpoly
                     error("Missing coordinate override for NONPOLYMER atom '$atom_name' at token index $t")
                 end
-                if haskey(ref_atom_charge, tok)
+                if _ccd_entry !== nothing && haskey(_ccd_entry.atom_charges, atom_name)
+                    ref_charge[m, b] = _ccd_entry.atom_charges[atom_name]
+                elseif haskey(ref_atom_charge, tok)
                     tok_ref_charge = ref_atom_charge[tok]
                     if haskey(tok_ref_charge, atom_name)
                         ref_charge[m, b] = tok_ref_charge[atom_name]
                     end
                 end
 
-                z = _atomic_num_from_atom_name(atom_name)
+                z = if _ccd_entry !== nothing && haskey(_ccd_entry.atom_elements, atom_name)
+                    _ccd_entry.atom_elements[atom_name]
+                elseif _ccd_entry !== nothing
+                    # CCD NONPOLYMER token but atom not in cache — error, not fallback.
+                    error("NONPOLYMER atom '$atom_name' (token $t, CCD='$(token_ccd_codes[t])') " *
+                          "not found in CCD cache element table. Cache may be incomplete.")
+                else
+                    # SMILES NONPOLYMER or polymer token — heuristic is safe.
+                    # SMILES atom names encode element symbols (e.g. "C1" → carbon).
+                    _atomic_num_from_atom_name(atom_name)
+                end
                 zidx = z + 1
                 if 1 <= zidx <= num_elements
                     ref_element[zidx, m, b] = 1f0
@@ -1123,6 +1149,7 @@ function build_design_features(
         "token_resolved_mask" => token_resolved_mask,
         "token_disto_mask" => token_disto_mask,
         "structure_group" => reshape(structure_group_v, T, 1) .* ones(Int, 1, B),
+        "token_ccd_codes" => token_ccd_codes === nothing ? fill("", T) : copy(token_ccd_codes),
     )
 end
 
@@ -2022,6 +2049,130 @@ function load_structure_tokens(
         end
     end
 
+    # Build token_ccd_codes: for NONPOLYMER tokens, use the comp_id (CCD code)
+    # so the featurizer can look up correct elements/charges from the CCD cache.
+    token_ccd_codes = String[]
+    for i in eachindex(mol_types)
+        if mol_types[i] == chain_type_ids["NONPOLYMER"]
+            push!(token_ccd_codes, uppercase(comp_ids[i]))
+        else
+            push!(token_ccd_codes, "")
+        end
+    end
+
+    # ── Atomize NONPOLYMER tokens ──────────────────────────────────────────────
+    # Python atomizes CCD ligands: each heavy atom becomes its own token.
+    # This is required so that token_bonds (token×token) can encode intra-molecular
+    # bonds, and the model sees the same token layout as the design path.
+    # token_atom_ref_coords: CCD canonical conformer coordinates (only for atomized NONPOLYMER tokens)
+    token_atom_ref_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+    has_nonpoly = any(m == chain_type_ids["NONPOLYMER"] for m in mol_types)
+    if has_nonpoly
+        out_residue_tokens = String[]
+        out_mol_types = Int[]
+        out_asym_ids = Int[]
+        out_entity_ids = Int[]
+        out_sym_ids = Int[]
+        out_residue_indices = Int[]
+        out_comp_ids = String[]
+        out_token_atom_names = Vector{Vector{String}}()
+        out_token_atom_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+        out_chain_labels = String[]
+        out_token_ccd_codes = String[]
+        out_token_bonds = NTuple{3,Int}[]
+        out_token_atom_ref_coords = Vector{Dict{String,NTuple{3,Float32}}}()
+
+        # Map old token index → range of new token indices
+        old_to_new_start = Dict{Int,Int}()
+
+        for t in eachindex(residue_tokens)
+            old_to_new_start[t] = length(out_residue_tokens) + 1
+            if mol_types[t] == chain_type_ids["NONPOLYMER"]
+                code = uppercase(comp_ids[t])
+                entry = load_ccd_ligand_cache_entry(code)
+                names = entry.atom_names
+                n_atoms = length(names)
+                n_atoms > 0 || error("CCD '$code' has zero heavy atoms in cache")
+                start_idx = length(out_residue_tokens) + 1
+
+                pdb_coords = token_atom_coords[t]
+                ref_coords = entry.atom_ref_coords
+
+                for atom_name in names
+                    atom_coord = get(pdb_coords, atom_name, (0f0, 0f0, 0f0))
+                    ref_coord = get(ref_coords, atom_name, (0f0, 0f0, 0f0))
+                    push!(out_residue_tokens, residue_tokens[t])
+                    push!(out_mol_types, mol_types[t])
+                    push!(out_asym_ids, asym_ids[t])
+                    push!(out_entity_ids, entity_ids[t])
+                    push!(out_sym_ids, sym_ids[t])
+                    push!(out_residue_indices, residue_indices[t])
+                    push!(out_comp_ids, comp_ids[t])
+                    push!(out_token_atom_names, [atom_name])
+                    push!(out_token_atom_coords, Dict{String,NTuple{3,Float32}}(atom_name => atom_coord))
+                    push!(out_token_atom_ref_coords, Dict{String,NTuple{3,Float32}}(atom_name => ref_coord))
+                    push!(out_chain_labels, chain_labels[t])
+                    push!(out_token_ccd_codes, code)
+                end
+
+                # Add intra-molecular bonds from CCD cache
+                for (i, j, bt) in entry.bonds
+                    1 <= i <= n_atoms || error("CCD '$code' bond index out of range: i=$i n_atoms=$n_atoms")
+                    1 <= j <= n_atoms || error("CCD '$code' bond index out of range: j=$j n_atoms=$n_atoms")
+                    t1 = start_idx + i - 1
+                    t2 = start_idx + j - 1
+                    push!(out_token_bonds, (t1, t2, bt))
+                end
+            else
+                # Non-NONPOLYMER token: pass through unchanged
+                push!(out_residue_tokens, residue_tokens[t])
+                push!(out_mol_types, mol_types[t])
+                push!(out_asym_ids, asym_ids[t])
+                push!(out_entity_ids, entity_ids[t])
+                push!(out_sym_ids, sym_ids[t])
+                push!(out_residue_indices, residue_indices[t])
+                push!(out_comp_ids, comp_ids[t])
+                push!(out_token_atom_names, token_atom_names[t])
+                push!(out_token_atom_coords, token_atom_coords[t])
+                push!(out_token_atom_ref_coords, Dict{String,NTuple{3,Float32}}())
+                push!(out_chain_labels, chain_labels[t])
+                push!(out_token_ccd_codes, token_ccd_codes[t])
+            end
+        end
+
+        # Remap inter-residue bonds from old token indices to new token indices.
+        # These bonds (from conn_pairs) link different residues. For non-atomized
+        # tokens the mapping is 1:1. For atomized tokens we can't know which specific
+        # atom the bond targets, so drop those (CCD intra-molecular bonds are already added above).
+        for (a, b, bt) in token_bonds
+            new_a = get(old_to_new_start, a, 0)
+            new_b = get(old_to_new_start, b, 0)
+            new_a > 0 && new_b > 0 || continue
+            # Only keep if both endpoints are non-atomized (single token → single token)
+            a_is_nonpoly = mol_types[a] == chain_type_ids["NONPOLYMER"]
+            b_is_nonpoly = mol_types[b] == chain_type_ids["NONPOLYMER"]
+            if !a_is_nonpoly && !b_is_nonpoly
+                push!(out_token_bonds, (new_a, new_b, bt))
+            end
+            # Inter-residue bonds involving NONPOLYMER residues are dropped because
+            # we can't map residue-level connectivity to atom-level token indices.
+        end
+
+        residue_tokens = out_residue_tokens
+        mol_types = out_mol_types
+        asym_ids = out_asym_ids
+        entity_ids = out_entity_ids
+        sym_ids = out_sym_ids
+        residue_indices = out_residue_indices
+        comp_ids = out_comp_ids
+        token_atom_names = out_token_atom_names
+        token_atom_coords = out_token_atom_coords
+        token_atom_ref_coords = out_token_atom_ref_coords
+        chain_labels = out_chain_labels
+        token_ccd_codes = out_token_ccd_codes
+        token_bonds = out_token_bonds
+    end
+
     return (
         residue_tokens=residue_tokens,
         mol_types=mol_types,
@@ -2032,8 +2183,10 @@ function load_structure_tokens(
         comp_ids=comp_ids,
         token_atom_names=token_atom_names,
         token_atom_coords=token_atom_coords,
+        token_atom_ref_coords=token_atom_ref_coords,
         chain_labels=chain_labels,
         token_bonds=token_bonds,
+        token_ccd_codes=token_ccd_codes,
     )
 end
 
@@ -2068,6 +2221,8 @@ function build_design_features_from_structure(
     T = length(parsed.residue_tokens)
     design_v = design_mask === nothing ? falses(T) : collect(design_mask)
     groups_v = structure_group === nothing ? ones(Int, T) : structure_group
+    # Merge caller-provided bonds with bonds from the parsed structure (CCD cache + connectivity)
+    all_bonds = vcat(bonds, parsed.token_bonds)
     return build_design_features(
         parsed.residue_tokens;
         mol_types=parsed.mol_types,
@@ -2092,12 +2247,14 @@ function build_design_features_from_structure(
         template_paths=template_paths,
         max_templates=max_templates,
         template_include_chains=template_include_chains,
-        bonds=bonds,
+        bonds=all_bonds,
         contact_pairs=contact_pairs,
         batch=batch,
         pad_atom_multiple=pad_atom_multiple,
         force_atom14_for_designed_protein=force_atom14_for_designed_protein,
         token_atom_names_override=parsed.token_atom_names,
         token_atom_coords_override=parsed.token_atom_coords,
+        token_atom_ref_coords_override=isempty(parsed.token_atom_ref_coords) ? nothing : parsed.token_atom_ref_coords,
+        token_ccd_codes=parsed.token_ccd_codes,
     )
 end

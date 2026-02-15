@@ -1,0 +1,7 @@
+entities:
+  - protein:
+      id: A
+      sequence: 12
+  - ligand:
+      id: B
+      smiles: "OC[C@H]1OC(O)[C@H](O)[C@@H](O)[C@@H]1O"

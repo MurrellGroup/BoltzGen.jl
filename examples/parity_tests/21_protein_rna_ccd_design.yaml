@@ -1,0 +1,10 @@
+entities:
+  - protein:
+      id: A
+      sequence: 10
+  - rna:
+      id: B
+      sequence: AUGCAUGC
+  - ligand:
+      id: C
+      ccd: ATP

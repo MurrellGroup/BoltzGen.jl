@@ -162,6 +162,9 @@ function main()
     residue_indices = copy(parsed.residue_indices)
     token_atom_names_override = copy(parsed.token_atom_names)
     token_atom_coords_override = copy(parsed.token_atom_coords)
+    token_ccd_codes = copy(parsed.token_ccd_codes)
+    token_atom_ref_coords_override = copy(parsed.token_atom_ref_coords)
+    token_bonds = copy(parsed.token_bonds)
 
     T_target = length(residues)
     println(
@@ -191,6 +194,10 @@ function main()
             push!(residue_indices, next_res + k - 1)
             push!(token_atom_names_override, String[])
             push!(token_atom_coords_override, Dict{String,NTuple{3,Float32}}())
+            if !isempty(token_atom_ref_coords_override)
+                push!(token_atom_ref_coords_override, Dict{String,NTuple{3,Float32}}())
+            end
+            push!(token_ccd_codes, "")
         end
     end
 
@@ -272,6 +279,9 @@ function main()
         batch=1,
         token_atom_names_override=token_atom_names_override,
         token_atom_coords_override=token_atom_coords_override,
+        token_atom_ref_coords_override=isempty(token_atom_ref_coords_override) ? nothing : token_atom_ref_coords_override,
+        token_ccd_codes=token_ccd_codes,
+        bonds=token_bonds,
     )
 
     feats_masked = BoltzGen.boltz_masker(feats; mask=true, mask_backbone=false)

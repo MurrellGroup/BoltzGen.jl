@@ -126,10 +126,30 @@ function load_ccd_ligand_cache_entry(code::AbstractString; cache_path::Union{Not
         push!(bonds, (edge[1], edge[2], bt))
     end
 
+    # Load per-atom elements (atomic numbers) and formal charges from cache.
+    atom_elements = Dict{String,Int}()
+    atom_charges = Dict{String,Float32}()
+    if haskey(f, "$base/elements")
+        atom_elements_raw = Array(f["$base/elements"])
+        length(atom_elements_raw) == n_atoms || error("CCD '$c' elements length mismatch: $(length(atom_elements_raw)) vs $n_atoms")
+        for i in 1:n_atoms
+            atom_elements[atom_names[i]] = Int(atom_elements_raw[i])
+        end
+    end
+    if haskey(f, "$base/charges")
+        atom_charges_raw = Array(f["$base/charges"])
+        length(atom_charges_raw) == n_atoms || error("CCD '$c' charges length mismatch: $(length(atom_charges_raw)) vs $n_atoms")
+        for i in 1:n_atoms
+            atom_charges[atom_names[i]] = Float32(atom_charges_raw[i])
+        end
+    end
+
     entry = (
         atom_names=atom_names,
         atom_ref_coords=atom_ref_coords,
         bonds=bonds,
+        atom_elements=atom_elements,
+        atom_charges=atom_charges,
     )
     _ccd_entry_cache[key] = entry
     return entry

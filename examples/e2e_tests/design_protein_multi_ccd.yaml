@@ -1,0 +1,10 @@
+entities:
+  - protein:
+      id: A
+      sequence: 12
+  - ligand:
+      id: B
+      ccd: NAD
+  - ligand:
+      id: C
+      ccd: GOL

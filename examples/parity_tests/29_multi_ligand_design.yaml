@@ -1,0 +1,10 @@
+entities:
+  - protein:
+      id: A
+      sequence: 15
+  - ligand:
+      id: B
+      ccd: ATP
+  - ligand:
+      id: C
+      smiles: "CCO"

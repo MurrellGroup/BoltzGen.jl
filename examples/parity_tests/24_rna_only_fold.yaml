@@ -1,0 +1,4 @@
+entities:
+  - rna:
+      id: A
+      sequence: AUGCAUGCAUGC
