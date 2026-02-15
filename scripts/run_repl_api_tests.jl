@@ -21,6 +21,7 @@ if USE_GPU
     println("GPU mode enabled — loading CUDA and cuDNN...")
     using CUDA
     using cuDNN
+    using OnionTile  # Activate cuTile-accelerated kernels (flash attention, layernorm, etc.)
     println("CUDA functional: ", CUDA.functional())
     CUDA.functional() || error("CUDA is not functional. Cannot run GPU tests.")
     println("GPU device: ", CUDA.device())
