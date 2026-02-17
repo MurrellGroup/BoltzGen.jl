@@ -374,12 +374,37 @@ end
 # ── fold_from_sequence ──────────────────────────────────────────────────────────
 
 """
-    fold_from_sequence(handle, sequence; steps=100, recycles=3, seed=nothing) → Dict
+    fold_from_sequence(handle, sequence; steps=100, recycles=3, seed=nothing, ...) → Dict
 
 Fold a single-chain sequence. Requires a Boltz2 handle (from `load_boltz2()`).
 For multi-chain folding, use `fold_from_sequences`.
 
-MSA can be provided via `msa_file` (path to FASTA/A3M) or `msa_sequences` (Vector{String}).
+# Keyword arguments
+- `chain_type`: Chain type string (default: `"PROTEIN"`). Also supports `"DNA"` and `"RNA"`.
+- `steps`: Number of diffusion steps (default: 100).
+- `recycles`: Number of recycling iterations (default: 3).
+- `seed`: Random seed for reproducibility (default: `nothing`).
+- `msa_file`: Path to MSA file (FASTA/A3M format).
+- `msa_sequences`: Pre-loaded MSA sequences as `Vector{String}`.
+- `max_msa_rows`: Maximum number of MSA rows to use.
+- `template_paths`: Vector of CIF/PDB paths to use as structural templates (default: `String[]`).
+  The Python official fold pipeline uses `target_templates: true` in `folding.yaml`, which passes
+  designed structures as template data. Providing template paths populates template_ca, template_cb,
+  template_frame_rot, template_frame_t, and template_mask features.
+- `max_templates`: Maximum number of templates to use (default: `nothing`, uses all).
+- `template_include_chains`: Which chains from template files to include (default: `nothing`, all chains).
+
+# Example
+```julia
+fold = BoltzGen.load_boltz2(; gpu=true)
+
+# Basic fold
+result = BoltzGen.fold_from_sequence(fold, "GGGGGGGGGGGGGG"; steps=200, seed=7)
+
+# Fold with template (improves geometry for short/degenerate sequences)
+result = BoltzGen.fold_from_sequence(fold, "GGGGGGGGGGGGGG";
+    steps=200, seed=7, template_paths=["designed_structure.cif"])
+```
 """
 function fold_from_sequence(
     handle::BoltzGenHandle,
@@ -391,6 +416,9 @@ function fold_from_sequence(
     msa_file::Union{Nothing,AbstractString}=nothing,
     msa_sequences::Union{Nothing,Vector{String}}=nothing,
     max_msa_rows::Union{Nothing,Int}=nothing,
+    template_paths::Vector{String}=String[],
+    max_templates::Union{Nothing,Int}=nothing,
+    template_include_chains::Union{Nothing,Vector{String}}=nothing,
 )
     _validate_fold_handle(handle)
     seed !== nothing && Random.seed!(seed)
@@ -412,6 +440,9 @@ function fold_from_sequence(
         design_mask=dm,
         msa_sequences=msa_seqs,
         max_msa_rows=max_msa_rows,
+        template_paths=template_paths,
+        max_templates=max_templates,
+        template_include_chains=template_include_chains,
         augment_ref_pos=true,
         batch=1,
     )
@@ -423,14 +454,23 @@ end
 # ── fold_from_sequences (multi-chain) ─────────────────────────────────────────
 
 """
-    fold_from_sequences(handle, sequences; steps=100, recycles=3, seed=nothing) → Dict
+    fold_from_sequences(handle, sequences; steps=100, recycles=3, seed=nothing, ...) → Dict
 
 Fold a multi-chain complex from multiple sequences. Each element of `sequences` becomes
 a separate chain with its own `asym_id` and `entity_id`.
 
-# Arguments
-- `sequences`: Vector of amino acid sequences, one per chain
-- `chain_types`: Vector of chain types (default: all "PROTEIN"). Must match length of `sequences`.
+# Keyword arguments
+- `sequences`: Vector of amino acid sequences, one per chain.
+- `chain_types`: Vector of chain types (default: all `"PROTEIN"`). Must match length of `sequences`.
+- `steps`: Number of diffusion steps (default: 100).
+- `recycles`: Number of recycling iterations (default: 3).
+- `seed`: Random seed for reproducibility (default: `nothing`).
+- `msa_file`: Path to MSA file (FASTA/A3M format).
+- `msa_sequences`: Pre-loaded MSA sequences as `Vector{String}`.
+- `max_msa_rows`: Maximum number of MSA rows to use.
+- `template_paths`: Vector of CIF/PDB paths to use as structural templates (default: `String[]`).
+- `max_templates`: Maximum number of templates to use (default: `nothing`, uses all).
+- `template_include_chains`: Which chains from template files to include (default: `nothing`, all chains).
 
 # Example
 ```julia
@@ -453,6 +493,9 @@ function fold_from_sequences(
     msa_file::Union{Nothing,AbstractString}=nothing,
     msa_sequences::Union{Nothing,Vector{String}}=nothing,
     max_msa_rows::Union{Nothing,Int}=nothing,
+    template_paths::Vector{String}=String[],
+    max_templates::Union{Nothing,Int}=nothing,
+    template_include_chains::Union{Nothing,Vector{String}}=nothing,
 )
     _validate_fold_handle(handle)
     seed !== nothing && Random.seed!(seed)
@@ -507,6 +550,9 @@ function fold_from_sequences(
         design_mask=dm,
         msa_sequences=msa_seqs,
         max_msa_rows=max_msa_rows,
+        template_paths=template_paths,
+        max_templates=max_templates,
+        template_include_chains=template_include_chains,
         augment_ref_pos=true,
         batch=1,
     )
@@ -520,9 +566,20 @@ end
 """
     fold_from_structure(handle, target_path; steps=100, recycles=3, seed=nothing, ...) → Dict
 
-Maps to `run_fold_from_structure.jl`. Requires a Boltz2 handle.
+Fold from an existing structure (CIF/PDB). Requires a Boltz2 handle.
 
-MSA can be provided via `msa_file` (path to FASTA/A3M) or `msa_sequences` (Vector{String}).
+# Keyword arguments
+- `include_chains`: Which chains to include from the structure (default: `nothing`, all chains).
+- `include_nonpolymer`: Whether to include NONPOLYMER (ligand) tokens (default: `true`).
+- `steps`: Number of diffusion steps (default: 100).
+- `recycles`: Number of recycling iterations (default: 3).
+- `seed`: Random seed for reproducibility (default: `nothing`).
+- `msa_file`: Path to MSA file (FASTA/A3M format).
+- `msa_sequences`: Pre-loaded MSA sequences as `Vector{String}`.
+- `max_msa_rows`: Maximum number of MSA rows to use.
+- `template_paths`: Vector of CIF/PDB paths to use as structural templates (default: `String[]`).
+- `max_templates`: Maximum number of templates to use (default: `nothing`, uses all).
+- `template_include_chains`: Which chains from template files to include (default: `nothing`, all chains).
 """
 function fold_from_structure(
     handle::BoltzGenHandle,
@@ -535,6 +592,9 @@ function fold_from_structure(
     msa_file::Union{Nothing,AbstractString}=nothing,
     msa_sequences::Union{Nothing,Vector{String}}=nothing,
     max_msa_rows::Union{Nothing,Int}=nothing,
+    template_paths::Vector{String}=String[],
+    max_templates::Union{Nothing,Int}=nothing,
+    template_include_chains::Union{Nothing,Vector{String}}=nothing,
 )
     _validate_fold_handle(handle)
     seed !== nothing && Random.seed!(seed)
@@ -570,6 +630,9 @@ function fold_from_structure(
         affinity_token_mask=affinity_token_mask,
         msa_sequences=msa_seqs,
         max_msa_rows=max_msa_rows,
+        template_paths=template_paths,
+        max_templates=max_templates,
+        template_include_chains=template_include_chains,
         augment_ref_pos=true,
         batch=1,
         token_atom_names_override=parsed.token_atom_names,

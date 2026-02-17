@@ -12,6 +12,7 @@ include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
 
 using Onion
 using Random
+using MoleculeFlow  # Must be loaded before BoltzGen to trigger extension
 
 # Parse --gpu flag
 const USE_GPU = "--gpu" in ARGS
@@ -27,8 +28,7 @@ if USE_GPU
     println("GPU device: ", CUDA.device())
 end
 
-include(normpath(joinpath(@__DIR__, "..", "src", "BoltzGen.jl")))
-using .BoltzGen
+using BoltzGen
 
 Onion.bg_set_training!(false)
 
@@ -248,6 +248,36 @@ run_case("case_msa_lysozyme_fold") do
     tee("    without MSA (S=1):   $(round(t_no_msa; digits=2))s")
     tee("    with MSA (S=100):    $(round(t_msa; digits=2))s")
     tee("    ratio: $(round(t_msa / t_no_msa; digits=2))x")
+end
+
+# Case template: Fold poly-GLY without and with structural template
+# Python's official fold pipeline uses target_templates=true, passing designed structures
+# as template data. Without templates, poly-GLY often has 1-2 bond violations (degenerate
+# input with no sequence information). With templates, violations drop to 0.
+const TEMPLATE_CIF = normpath(joinpath(WORKSPACE_ROOT, "..", "PythonBoltzGen",
+    "polyG_official_output", "intermediate_designs_inverse_folded", "polyG_fold_test.cif"))
+
+run_case("case_template_polyG_no_template") do
+    # Baseline: fold poly-GLY without template — some violations expected
+    result = BoltzGen.fold_from_sequence(fold, "GGGGGGGGGGGGGG"; steps=200, recycles=3, seed=7)
+    BoltzGen.write_outputs(result, joinpath(OUT, "case_template_polyG_no_template"))
+    check_geometry(result; label="atom37")
+    check_bonds(result)
+    check_string_outputs(result)
+    metrics = BoltzGen.confidence_metrics(result)
+    tee("  NOTE: poly-GLY without templates may have ~1-2 bond violations (degenerate input)")
+end
+
+run_case("case_template_polyG_with_template") do
+    isfile(TEMPLATE_CIF) || error("Template CIF not found at $TEMPLATE_CIF")
+    result = BoltzGen.fold_from_sequence(fold, "GGGGGGGGGGGGGG";
+        steps=200, recycles=3, seed=7, template_paths=[TEMPLATE_CIF])
+    BoltzGen.write_outputs(result, joinpath(OUT, "case_template_polyG_with_template"))
+    check_geometry(result; label="atom37")
+    check_bonds(result)
+    check_string_outputs(result)
+    metrics = BoltzGen.confidence_metrics(result)
+    tee("  Template should reduce/eliminate violations vs no-template baseline")
 end
 
 # Release boltz2 conf model
