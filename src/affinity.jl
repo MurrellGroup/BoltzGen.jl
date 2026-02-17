@@ -193,11 +193,7 @@ function _apply_seq(seq, x)
     return out
 end
 
-function _unsqueeze_local(x, dim::Int)
-    sz = collect(size(x))
-    insert!(sz, dim, 1)
-    return reshape(x, Tuple(sz))
-end
+# _unsqueeze_local is defined in confidence.jl (same module, included first)
 
 function (ah::AffinityHeadsTransformer)(
     z,
