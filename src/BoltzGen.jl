@@ -1,6 +1,8 @@
 module BoltzGen
 
 using Onion
+using ProtInterop
+using ProtInterop: BondViolation  # re-exported by BoltzGen
 using NNlib
 using Statistics
 using LinearAlgebra

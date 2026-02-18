@@ -1,149 +1,17 @@
 # Bond length validation for protein structures.
 #
-# Checks all backbone and sidechain covalent bonds against expected lengths
-# derived from reference atom positions (ref_pos_table.jl), with configurable
-# tolerance (default: 90%-110% of expected).
+# Bond connectivity, expected lengths, sp2 overrides, and BondViolation type
+# all come from ProtInterop. This file provides aliases for backward compatibility
+# and the BoltzGen-specific checker functions.
 
-# ── Bond connectivity tables ────────────────────────────────────────────────────
+# ── Aliases from ProtInterop ──────────────────────────────────────────────────
 
-# Intra-residue backbone bonds (same for all amino acids)
-const _BACKBONE_BONDS = [("N", "CA"), ("CA", "C"), ("C", "O")]
-
-# Sidechain bonds per amino acid (CA-CB is the branch point, included here)
-const _SIDECHAIN_BONDS = Dict{String,Vector{Tuple{String,String}}}(
-    "GLY" => [],
-    "ALA" => [("CA", "CB")],
-    "VAL" => [("CA", "CB"), ("CB", "CG1"), ("CB", "CG2")],
-    "LEU" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD1"), ("CG", "CD2")],
-    "ILE" => [("CA", "CB"), ("CB", "CG1"), ("CB", "CG2"), ("CG1", "CD1")],
-    "PRO" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD"), ("CD", "N")],
-    "PHE" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD1"), ("CG", "CD2"),
-              ("CD1", "CE1"), ("CD2", "CE2"), ("CE1", "CZ"), ("CE2", "CZ")],
-    "TRP" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD1"), ("CG", "CD2"),
-              ("CD1", "NE1"), ("NE1", "CE2"), ("CD2", "CE2"), ("CD2", "CE3"),
-              ("CE2", "CZ2"), ("CE3", "CZ3"), ("CZ2", "CH2"), ("CZ3", "CH2")],
-    "MET" => [("CA", "CB"), ("CB", "CG"), ("CG", "SD"), ("SD", "CE")],
-    "CYS" => [("CA", "CB"), ("CB", "SG")],
-    "SER" => [("CA", "CB"), ("CB", "OG")],
-    "THR" => [("CA", "CB"), ("CB", "OG1"), ("CB", "CG2")],
-    "ASN" => [("CA", "CB"), ("CB", "CG"), ("CG", "OD1"), ("CG", "ND2")],
-    "ASP" => [("CA", "CB"), ("CB", "CG"), ("CG", "OD1"), ("CG", "OD2")],
-    "GLN" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD"), ("CD", "OE1"), ("CD", "NE2")],
-    "GLU" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD"), ("CD", "OE1"), ("CD", "OE2")],
-    "LYS" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD"), ("CD", "CE"), ("CE", "NZ")],
-    "ARG" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD"), ("CD", "NE"),
-              ("NE", "CZ"), ("CZ", "NH1"), ("CZ", "NH2")],
-    "HIS" => [("CA", "CB"), ("CB", "CG"), ("CG", "ND1"), ("CG", "CD2"),
-              ("ND1", "CE1"), ("CD2", "NE2"), ("CE1", "NE2")],
-    "TYR" => [("CA", "CB"), ("CB", "CG"), ("CG", "CD1"), ("CG", "CD2"),
-              ("CD1", "CE1"), ("CD2", "CE2"), ("CE1", "CZ"), ("CE2", "CZ"),
-              ("CZ", "OH")],
-    "UNK" => [("CA", "CB")],
-)
-
-# ── Compute reference bond lengths from ref_pos_table ───────────────────────────
-
-function _ref_bond_length(res::String, a1::String, a2::String)
-    pos = ref_atom_pos[res]
-    haskey(pos, a1) || error("atom $a1 not in ref_atom_pos[$res]")
-    haskey(pos, a2) || error("atom $a2 not in ref_atom_pos[$res]")
-    p1 = pos[a1]
-    p2 = pos[a2]
-    return sqrt((p1[1]-p2[1])^2 + (p1[2]-p2[2])^2 + (p1[3]-p2[3])^2)
-end
-
-# Build lookup: (residue, atom1, atom2) -> expected bond length
-const _EXPECTED_BOND_LENGTHS = let d = Dict{Tuple{String,String,String}, Float32}()
-    for res in keys(_SIDECHAIN_BONDS)
-        haskey(ref_atom_pos, res) || continue
-        # Backbone bonds
-        for (a1, a2) in _BACKBONE_BONDS
-            if haskey(ref_atom_pos[res], a1) && haskey(ref_atom_pos[res], a2)
-                d[(res, a1, a2)] = _ref_bond_length(res, a1, a2)
-            end
-        end
-        # Sidechain bonds
-        for (a1, a2) in _SIDECHAIN_BONDS[res]
-            if haskey(ref_atom_pos[res], a1) && haskey(ref_atom_pos[res], a2)
-                d[(res, a1, a2)] = _ref_bond_length(res, a1, a2)
-            end
-        end
-    end
-    d
-end
-
-# Override sp2 carboxylate/aromatic bond lengths that the ref_atom_pos table gets
-# wrong (it stores sp3-like distances, but these bonds are shorter in reality).
-const _SP2_BOND_LENGTH_OVERRIDES = Dict{Tuple{String,String,String}, Float32}(
-    # Carboxylate oxygens: C=O / C-O resonance, actual ~1.25 A
-    ("ASP", "CG", "OD1") => 1.25f0,
-    ("ASP", "CG", "OD2") => 1.25f0,
-    ("GLU", "CD", "OE1") => 1.25f0,
-    ("GLU", "CD", "OE2") => 1.25f0,
-    # Guanidinium C-N bonds in ARG: resonance, actual ~1.33 A
-    ("ARG", "NE", "CZ")  => 1.33f0,
-    ("ARG", "CZ", "NH1") => 1.33f0,
-    ("ARG", "CZ", "NH2") => 1.33f0,
-    # Aromatic C-C bonds: actual ~1.38 A (ref table has sp3 ~1.53)
-    ("PHE", "CG", "CD1") => 1.38f0,
-    ("PHE", "CG", "CD2") => 1.38f0,
-    ("PHE", "CD1", "CE1") => 1.38f0,
-    ("PHE", "CD2", "CE2") => 1.38f0,
-    ("PHE", "CE1", "CZ") => 1.38f0,
-    ("PHE", "CE2", "CZ") => 1.38f0,
-    ("TYR", "CG", "CD1") => 1.38f0,
-    ("TYR", "CG", "CD2") => 1.38f0,
-    ("TYR", "CD1", "CE1") => 1.38f0,
-    ("TYR", "CD2", "CE2") => 1.38f0,
-    ("TYR", "CE1", "CZ") => 1.38f0,
-    ("TYR", "CE2", "CZ") => 1.38f0,
-    ("TRP", "CG", "CD1") => 1.38f0,
-    ("TRP", "CG", "CD2") => 1.43f0,
-    ("TRP", "CD1", "NE1") => 1.38f0,
-    ("TRP", "NE1", "CE2") => 1.37f0,
-    ("TRP", "CD2", "CE2") => 1.41f0,
-    ("TRP", "CD2", "CE3") => 1.40f0,
-    ("TRP", "CE2", "CZ2") => 1.40f0,
-    ("TRP", "CE3", "CZ3") => 1.38f0,
-    ("TRP", "CZ2", "CH2") => 1.37f0,
-    ("TRP", "CZ3", "CH2") => 1.40f0,
-    # HIS ring bonds
-    ("HIS", "CG", "ND1") => 1.37f0,
-    ("HIS", "CG", "CD2") => 1.35f0,
-    ("HIS", "ND1", "CE1") => 1.32f0,
-    ("HIS", "CD2", "NE2") => 1.37f0,
-    ("HIS", "CE1", "NE2") => 1.32f0,
-)
-
-# Peptide bond length C(i)-N(i+1): use average from ref positions
-const _PEPTIDE_BOND_LENGTH = let
-    lengths = Float32[]
-    for res in keys(_SIDECHAIN_BONDS)
-        haskey(ref_atom_pos, res) || continue
-        pos = ref_atom_pos[res]
-        if haskey(pos, "C") && haskey(pos, "N")
-            # The C-N distance within a residue is NOT the peptide bond.
-            # Use standard value: 1.329 A
-        end
-    end
-    1.329f0
-end
-
-# ── Bond violation struct ───────────────────────────────────────────────────────
-
-struct BondViolation
-    res_idx::Int          # 1-based position in sequence
-    res_name::String      # 3-letter code (e.g. "ALA")
-    chain_id::String      # chain letter
-    atom1::String         # first atom name
-    atom2::String         # second atom name
-    expected::Float32     # expected bond length (A)
-    actual::Float32       # actual bond length (A)
-    min_allowed::Float32  # lower tolerance bound
-    max_allowed::Float32  # upper tolerance bound
-    kind::Symbol          # :too_short or :too_long
-    is_backbone::Bool     # backbone or sidechain bond
-end
+const _BACKBONE_BONDS = ProtInterop.BACKBONE_BONDS
+const _SIDECHAIN_BONDS = ProtInterop.SIDECHAIN_BONDS
+const _EXPECTED_BOND_LENGTHS = ProtInterop.EXPECTED_BOND_LENGTHS
+const _SP2_BOND_LENGTH_OVERRIDES = ProtInterop.SP2_BOND_LENGTH_OVERRIDES
+const _PEPTIDE_BOND_LENGTH = ProtInterop.PEPTIDE_BOND_LENGTH
+# BondViolation is imported via `using ProtInterop: BondViolation` in BoltzGen.jl
 
 # ── Main checker ────────────────────────────────────────────────────────────────
 

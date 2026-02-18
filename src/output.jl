@@ -49,14 +49,7 @@ const atom14_ref_atoms = Dict(
     "UNK" => ["N", "CA", "C", "O", "CB"],
 )
 
-const simple_element_to_atomic_num = Dict(
-    "H" => 1,
-    "C" => 6,
-    "N" => 7,
-    "O" => 8,
-    "P" => 15,
-    "S" => 16,
-)
+const simple_element_to_atomic_num = ProtInterop.ELEMENT_TO_ATOMIC_NUM
 
 const PDB_COORD_MIN = -999.999f0
 const PDB_COORD_MAX = 9999.999f0
@@ -79,14 +72,7 @@ function _res_name_for_token(feats::Dict, token_idx::Int, res_type_slice, mol_ty
     return _res_name_from_onehot(res_type_slice)
 end
 
-const _ATOMIC_NUM_TO_SYMBOL = Dict{Int,String}(
-    1=>"H", 2=>"He", 3=>"Li", 4=>"Be", 5=>"B", 6=>"C", 7=>"N", 8=>"O",
-    9=>"F", 10=>"Ne", 11=>"Na", 12=>"Mg", 13=>"Al", 14=>"Si", 15=>"P",
-    16=>"S", 17=>"Cl", 18=>"Ar", 19=>"K", 20=>"Ca", 21=>"Sc", 22=>"Ti",
-    23=>"V", 24=>"Cr", 25=>"Mn", 26=>"Fe", 27=>"Co", 28=>"Ni", 29=>"Cu",
-    30=>"Zn", 33=>"As", 34=>"Se", 35=>"Br", 47=>"Ag", 50=>"Sn", 53=>"I",
-    78=>"Pt", 80=>"Hg", 82=>"Pb",
-)
+const _ATOMIC_NUM_TO_SYMBOL = ProtInterop.ATOMIC_NUM_TO_SYMBOL
 
 function _element_from_ref_element(ref_element_vec::AbstractVector)
     z = argmax(ref_element_vec) - 1  # ref_element is 0-indexed (z+1 = index)

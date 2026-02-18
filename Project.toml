@@ -4,6 +4,7 @@ version = "0.1.0"
 
 [deps]
 Onion = "fdebf6c2-71da-43a1-b539-c3bc3e09c5c6"
+ProtInterop = "b3e4c6a1-2f5a-4d8c-9e7b-1a3c5d9f0e2b"
 HuggingFaceApi = "3cc741c3-0c9d-4fbe-84fa-cdec264173de"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
