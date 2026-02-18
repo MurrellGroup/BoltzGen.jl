@@ -77,7 +77,12 @@ function (enc::RelativePositionEncoder)(feats)
     if any(cyclic .> 0)
         period = ifelse.(cyclic .> 0, cyclic, 10000)
         period = reshape(period, B, 1, N)
-        d_residue = round.(d_residue ./ period) .* (-period) .+ d_residue
+        # Python: d_residue = (d_residue - period * torch.round(d_residue / period)).long()
+        # Use Float32 for division to avoid Int64→Float64 promotion (not GPU-compatible),
+        # then convert back to Int matching Python's .long().
+        d_f = Float32.(d_residue)
+        p_f = Float32.(period)
+        d_residue = Int.(d_f .- p_f .* round.(d_f ./ p_f))
     end
 
     d_residue = clamp.(d_residue .+ enc.r_max, 0, 2 * enc.r_max)
