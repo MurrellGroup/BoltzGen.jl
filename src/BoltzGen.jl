@@ -2,7 +2,7 @@ module BoltzGen
 
 using Onion
 using ProtInterop
-using ProtInterop: BondViolation  # re-exported by BoltzGen
+using ProtInterop: BondViolation, load_msa_sequences  # re-exported by BoltzGen
 using NNlib
 using Statistics
 using LinearAlgebra

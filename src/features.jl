@@ -191,47 +191,7 @@ function _normalize_msa_row(row::AbstractString, T::Int)
     return String(aligned), has_del, del_val
 end
 
-function load_msa_sequences(path::AbstractString; max_rows::Union{Nothing, Int}=nothing)
-    isfile(path) || error("MSA file not found: $path")
-    lines = readlines(path)
-
-    rows = String[]
-    has_fasta_header = any(startswith(strip(line), ">") for line in lines)
-
-    if has_fasta_header
-        current = IOBuffer()
-        in_record = false
-        for raw in lines
-            line = strip(raw)
-            isempty(line) && continue
-            if startswith(line, ">")
-                if in_record
-                    push!(rows, String(take!(current)))
-                end
-                in_record = true
-                continue
-            end
-            in_record = true
-            print(current, line)
-        end
-        if in_record && position(current) > 0
-            push!(rows, String(take!(current)))
-        end
-    else
-        for raw in lines
-            line = strip(raw)
-            isempty(line) && continue
-            push!(rows, line)
-        end
-    end
-
-    isempty(rows) && error("No MSA rows found in file: $path")
-    if max_rows !== nothing
-        max_rows > 0 || error("max_rows must be positive")
-        rows = rows[1:min(end, max_rows)]
-    end
-    return rows
-end
+# load_msa_sequences is imported from ProtInterop (identical implementation).
 
 function _normalize_residue_token(token::AbstractString, mol_type_id::Int)
     t = uppercase(strip(String(token)))
