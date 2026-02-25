@@ -1,5 +1,3 @@
-include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
-
 function has_option(args::Vector{String}, name::AbstractString)
     needle = "--" * String(name)
     return any(a -> a == needle, args)

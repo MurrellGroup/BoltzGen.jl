@@ -1,5 +1,3 @@
-include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
-
 function parse_kv_args(args)
     out = Dict{String, String}()
     i = 1

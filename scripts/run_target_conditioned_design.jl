@@ -1,5 +1,3 @@
-include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
-
 using CUDA
 using cuDNN
 using Onion

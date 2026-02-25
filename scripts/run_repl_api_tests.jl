@@ -8,8 +8,6 @@
 #   julia --project=runfromhere BoltzGen.jl/scripts/run_repl_api_tests.jl --gpu [output_dir]
 #
 
-include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
-
 using Onion
 using Random
 using MoleculeFlow  # Must be loaded before BoltzGen to trigger extension

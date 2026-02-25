@@ -8,8 +8,6 @@
 #   julia --project=runfromhere BoltzGen.jl/scripts/benchmark_multichain_fold.jl --gpu
 #
 
-include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
-
 using Random
 
 # Parse --gpu flag

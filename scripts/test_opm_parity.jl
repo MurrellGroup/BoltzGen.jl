@@ -8,8 +8,6 @@
 #   julia --project=runfromhere BoltzGen.jl/scripts/test_opm_parity.jl --gpu
 #
 
-include(normpath(joinpath(@__DIR__, "_activate_runfromhere.jl")))
-
 using Random
 
 const USE_GPU = "--gpu" in ARGS
