@@ -84,7 +84,7 @@ Design a protein from a sequence or de novo.
 # De novo design (12 residues)
 result = BoltzGen.design_from_sequence(gen, ""; length=12, steps=20, seed=7)
 
-# Redesign specific positions
+# Partial-scaffold design (positions 3-6 masked to UNK; rest fixed)
 seq = "GGGGGGGGGG"
 mask = [false, false, true, true, true, true, false, false, false, false]
 result = BoltzGen.design_from_sequence(gen, seq; design_mask=mask, steps=100, seed=42)

@@ -42,17 +42,18 @@ BoltzGen.write_outputs(result, "denovo_30mer")
 pdb = BoltzGen.output_to_pdb(result)
 ```
 
-### Sequence Redesign
+### Partial-Scaffold Design
 
-Fix some positions and let the model redesign others:
+Fix some positions and design structure for others using a per-residue design mask.
+Masked positions have their sequence identity hidden (set to UNK) during structure generation:
 
 ```julia
-# 10-residue scaffold with positions 3-6 designable
+# 10-residue scaffold with positions 3-6 designable (masked to UNK)
 seq = "GGGGGGGGGG"
 mask = [false, false, true, true, true, true, false, false, false, false]
 result = BoltzGen.design_from_sequence(gen, seq; design_mask=mask, steps=100, seed=42)
 
-BoltzGen.write_outputs(result, "redesigned")
+BoltzGen.write_outputs(result, "partial_scaffold")
 ```
 
 ### Cyclic Peptide Design

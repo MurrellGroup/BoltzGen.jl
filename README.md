@@ -4,7 +4,7 @@ Unofficial Julia implementation of the BoltzGen/Boltz2 protein design and struct
 
 ## Features
 
-- **Protein design** — de novo design, sequence redesign, target-conditioned design, YAML-driven mixed-complex design
+- **Protein design** — de novo structure design, partial-scaffold design with design masks, target-conditioned design, YAML-driven mixed-complex design
 - **Structure prediction** — fold proteins from sequence, re-fold/refine from structure files
 - **Confidence scoring** — pTM, ipTM, pLDDT metrics via Boltz2 confidence heads
 - **Binding affinity prediction** — predict binding affinity for protein-ligand complexes
@@ -89,8 +89,8 @@ BoltzGen.jl includes two model families:
 ### BoltzGen1 — Protein Design
 
 BoltzGen1 is a generative model for protein structure design. It supports:
-- De novo protein design (generate new proteins from scratch)
-- Sequence redesign (redesign specific positions in a scaffold)
+- De novo protein structure design (generate new protein structures from scratch)
+- Partial-scaffold design with per-residue design masks
 - Cyclic peptide design
 - Target-conditioned design (design a binder for a given target structure)
 - Mixed-complex design from YAML specifications (protein + DNA/RNA + small molecules)
@@ -129,11 +129,14 @@ result = BoltzGen.design_from_sequence(gen, ""; length=30, steps=100, seed=7)
 pdb_str = BoltzGen.output_to_pdb(result)
 ```
 
-### Redesign specific positions
+### Partial-scaffold design
+
+Fix some positions and design structure for others using a per-residue design mask:
 
 ```julia
 gen = BoltzGen.load_boltzgen()
 
+# Positions 3-6 are designable (masked to UNK); rest are fixed
 seq = "GGGGGGGGGG"
 mask = [false, false, true, true, true, true, false, false, false, false]
 result = BoltzGen.design_from_sequence(gen, seq; design_mask=mask, steps=100, seed=42)

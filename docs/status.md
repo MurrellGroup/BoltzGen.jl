@@ -10,7 +10,7 @@ BoltzGen.jl is a Julia port of the BoltzGen/Boltz2 protein design and structure 
 
 ### Design (BoltzGen1)
 - De novo protein design (`design_from_sequence`, `denovo_sample`)
-- Sequence redesign with per-residue design masks
+- Partial-scaffold design with per-residue design masks
 - Cyclic peptide design
 - YAML-driven mixed-complex design (protein + DNA/RNA + small molecules)
 - Target-conditioned design from PDB/CIF structures
