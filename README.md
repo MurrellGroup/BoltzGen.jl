@@ -95,6 +95,9 @@ BoltzGen1 is a generative model for protein structure design. It supports:
 - Target-conditioned design (design a binder for a given target structure)
 - Mixed-complex design from YAML specifications (protein + DNA/RNA + small molecules)
 
+**Not yet implemented from the official BoltzGen:**
+- Sequence redesign (inverse folding — generating new sequences from a given structure)
+
 Load with `BoltzGen.load_boltzgen()`.
 
 ### Boltz2 — Structure Prediction (Folding)
