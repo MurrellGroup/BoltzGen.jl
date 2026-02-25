@@ -65,7 +65,7 @@ Confidence and affinity heads always run on CPU (data is moved from GPU before t
 ### 5. Model Family Constraints
 
 - **Boltz2 is fold-only**: design masks and design chain appending are rejected. Use BoltzGen1 for generative design.
-- **No MSA-based folding**: the current Boltz2 API accepts single sequences only.
+- **No automatic MSA search**: the package accepts pre-computed MSAs (via `msa_file` or `msa_sequences`) but does not run MSA search tools. You must provide alignments from external tools (e.g., MMseqs2, HHblits, Jackhmmer).
 
 ## Parity Rule
 

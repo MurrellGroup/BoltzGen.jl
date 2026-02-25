@@ -8,6 +8,7 @@ A Julia implementation of the BoltzGen/Boltz2 protein design and structure predi
 - **Structure prediction** — fold proteins from sequence, re-fold/refine from structure files
 - **Confidence scoring** — pTM, ipTM, pLDDT metrics via Boltz2 confidence heads
 - **Binding affinity prediction** — predict binding affinity for protein-ligand complexes
+- **MSA and template support** — pass pre-computed MSAs (FASTA/A3M) and structural templates to improve predictions
 - **Mixed-entity support** — protein, DNA, RNA, small molecules (SMILES and CCD codes)
 - **GPU acceleration** — full GPU inference via CUDA.jl; results always returned on CPU
 - **Multiple output formats** — PDB (atom14 and atom37 representations) and mmCIF
@@ -107,7 +108,7 @@ Boltz2 is a structure prediction model. It supports:
 
 **What Boltz2 does NOT support in this package:**
 - Design/generative sampling (design masks are rejected — use BoltzGen1 for design)
-- MSA-based folding (single-sequence input only in current API)
+- Automatic MSA search (you must provide pre-computed MSAs; the package does not run search tools like MMseqs2 or HHblits)
 
 Load with `BoltzGen.load_boltz2()`.
 
@@ -183,6 +184,29 @@ println("pTM: $(metrics.ptm)  pLDDT: $(metrics.complex_plddt)")
 # Write outputs
 BoltzGen.write_outputs(result, "fold_result")
 ```
+
+### Fold with MSA and templates
+
+All fold (and design) functions accept pre-computed MSAs and structural templates:
+
+```julia
+fold = BoltzGen.load_boltz2()
+
+# Fold with a pre-computed MSA (FASTA/A3M file)
+result = BoltzGen.fold_from_sequence(fold, "ACDEFGHIKLMNPQRSTVWY";
+    msa_file="my_msa.a3m", steps=200, seed=7)
+
+# Or pass MSA sequences directly
+msa = ["ACDEFGHIKLMNPQRSTVWY", "ACDEFGHIKLMNPQRSTVWF", "ACDEFGHIKLMNPQRSTVWH"]
+result = BoltzGen.fold_from_sequence(fold, "ACDEFGHIKLMNPQRSTVWY";
+    msa_sequences=msa, max_msa_rows=1024, steps=200, seed=7)
+
+# Fold with structural templates
+result = BoltzGen.fold_from_sequence(fold, "ACDEFGHIKLMNPQRSTVWY";
+    template_paths=["template1.cif", "template2.pdb"], steps=200, seed=7)
+```
+
+Note: BoltzGen.jl does **not** perform MSA search — you must provide pre-computed alignments from external tools (e.g., MMseqs2, HHblits, Jackhmmer).
 
 ### Fold an antibody VH domain
 

@@ -210,10 +210,41 @@ println("Binding probability: $(metrics.affinity_probability_binary)")
 # metrics.affinity_probability_binary, metrics.affinity_probability_binary1, metrics.affinity_probability_binary2
 ```
 
+### Fold with MSA
+
+All fold functions accept pre-computed MSAs via `msa_file` (path to FASTA/A3M) or `msa_sequences` (Vector{String}). BoltzGen.jl does **not** perform MSA search — you must provide alignments from external tools (e.g., MMseqs2, HHblits, Jackhmmer).
+
+```julia
+fold = BoltzGen.load_boltz2()
+
+# From a file
+result = BoltzGen.fold_from_sequence(fold, "ACDEFGHIKLMNPQRSTVWY";
+    msa_file="my_alignment.a3m", steps=200, seed=7)
+
+# From pre-loaded sequences
+msa = ["ACDEFGHIKLMNPQRSTVWY", "ACDEFGHIKLMNPQRSTVWF", "ACDEYGHIKLMNPQRSTVWY"]
+result = BoltzGen.fold_from_sequence(fold, "ACDEFGHIKLMNPQRSTVWY";
+    msa_sequences=msa, max_msa_rows=1024, steps=200, seed=7)
+```
+
+### Fold with Structural Templates
+
+Provide known structures as templates to guide folding:
+
+```julia
+fold = BoltzGen.load_boltz2()
+
+result = BoltzGen.fold_from_sequence(fold, "ACDEFGHIKLMNPQRSTVWY";
+    template_paths=["homolog1.cif", "homolog2.pdb"],
+    max_templates=4, steps=200, seed=7)
+```
+
+Template features populated: `template_ca`, `template_cb`, `template_frame_rot`, `template_frame_t`, and `template_mask`.
+
 ### What Boltz2 Does NOT Support
 
 - **Design/generative sampling**: Design masks are rejected. Use BoltzGen1 for protein design.
-- **MSA-based folding**: The current API accepts single-sequence input only.
+- **Automatic MSA search**: You must bring your own pre-computed alignments.
 
 ---
 

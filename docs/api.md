@@ -76,6 +76,9 @@ Design a protein from a sequence or de novo.
 | `recycles` | `Int` | `3` | Recycling iterations |
 | `seed` | `Int` | `nothing` | Random seed for reproducibility |
 | `cyclic` | `Bool` | `false` | Enforce cyclic peptide topology |
+| `msa_file` | `String` | `nothing` | Path to MSA file (FASTA/A3M format) |
+| `msa_sequences` | `Vector{String}` | `nothing` | Pre-loaded MSA sequences |
+| `max_msa_rows` | `Int` | `nothing` | Maximum number of MSA rows to use |
 
 ```julia
 # De novo design (12 residues)
@@ -166,12 +169,22 @@ Predict the 3D structure of a protein from its amino acid sequence. Returns coor
 | `steps` | `Int` | `100` | Diffusion sampling steps |
 | `recycles` | `Int` | `3` | Recycling iterations |
 | `seed` | `Int` | `nothing` | Random seed |
+| `msa_file` | `String` | `nothing` | Path to MSA file (FASTA/A3M format) |
+| `msa_sequences` | `Vector{String}` | `nothing` | Pre-loaded MSA sequences |
+| `max_msa_rows` | `Int` | `nothing` | Maximum number of MSA rows to use |
+| `template_paths` | `Vector{String}` | `String[]` | CIF/PDB paths to use as structural templates |
+| `max_templates` | `Int` | `nothing` | Maximum number of templates to use |
+| `template_include_chains` | `Vector{String}` | `nothing` | Which chains from template files to include |
 
 ```julia
 fold = BoltzGen.load_boltz2()
 result = BoltzGen.fold_from_sequence(fold, "EVQLVESGGGLVQPGGSLRLSC"; steps=200, seed=7)
 metrics = BoltzGen.confidence_metrics(result)
 println("pTM: ", metrics.ptm, "  ipTM: ", metrics.iptm)
+
+# With MSA and templates
+result = BoltzGen.fold_from_sequence(fold, "EVQLVESGGGLVQPGGSLRLSC";
+    msa_file="my_msa.a3m", template_paths=["template.cif"], steps=200, seed=7)
 ```
 
 ### `fold_from_sequences(handle, sequences; kwargs...) -> Dict`
@@ -182,9 +195,16 @@ Fold a multi-chain complex from multiple sequences.
 |----------|------|---------|-------------|
 | `handle` | `BoltzGenHandle` | required | Boltz2 model |
 | `sequences` | `Vector{String}` | required | Amino acid sequences (one per chain) |
+| `chain_types` | `Vector{String}` | `nothing` | Chain type per sequence (default: all `"PROTEIN"`) |
 | `steps` | `Int` | `100` | Diffusion sampling steps |
 | `recycles` | `Int` | `3` | Recycling iterations |
 | `seed` | `Int` | `nothing` | Random seed |
+| `msa_file` | `String` | `nothing` | Path to MSA file (FASTA/A3M format) |
+| `msa_sequences` | `Vector{String}` | `nothing` | Pre-loaded MSA sequences |
+| `max_msa_rows` | `Int` | `nothing` | Maximum number of MSA rows to use |
+| `template_paths` | `Vector{String}` | `String[]` | CIF/PDB paths to use as structural templates |
+| `max_templates` | `Int` | `nothing` | Maximum number of templates to use |
+| `template_include_chains` | `Vector{String}` | `nothing` | Which chains from template files to include |
 
 ```julia
 fold = BoltzGen.load_boltz2()
@@ -204,6 +224,12 @@ Re-fold or refine a structure from a PDB/CIF file. Useful for confidence scoring
 | `steps` | `Int` | `100` | Diffusion sampling steps |
 | `recycles` | `Int` | `3` | Recycling iterations |
 | `seed` | `Int` | `nothing` | Random seed |
+| `msa_file` | `String` | `nothing` | Path to MSA file (FASTA/A3M format) |
+| `msa_sequences` | `Vector{String}` | `nothing` | Pre-loaded MSA sequences |
+| `max_msa_rows` | `Int` | `nothing` | Maximum number of MSA rows to use |
+| `template_paths` | `Vector{String}` | `String[]` | CIF/PDB paths to use as structural templates |
+| `max_templates` | `Int` | `nothing` | Maximum number of templates to use |
+| `template_include_chains` | `Vector{String}` | `nothing` | Which chains from template files to include |
 
 ```julia
 aff = BoltzGen.load_boltz2(; affinity=true)
