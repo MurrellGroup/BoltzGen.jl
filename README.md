@@ -21,12 +21,12 @@ BoltzGen.jl is not yet registered in the Julia General registry. Add it directly
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/MurrellLab/BoltzGen.jl", rev="consolidation")
+Pkg.add(url="https://github.com/MurrellGroup/BoltzGen.jl", rev="consolidation")
 ```
 
 ### Dependencies
 
-BoltzGen.jl depends on [Onion.jl](https://github.com/MurrellLab/Onion.jl) (ML framework) and [ProtInterop.jl](https://github.com/MurrellLab/ProtInterop.jl) (shared protein utilities). These must be available in your environment.
+BoltzGen.jl depends on [Onion.jl](https://github.com/MurrellGroup/Onion.jl) (ML framework) and [ProtInterop.jl](https://github.com/MurrellGroup/ProtInterop.jl) (shared protein utilities). These must be available in your environment.
 
 For GPU support, you also need:
 ```julia
