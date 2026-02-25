@@ -1,6 +1,6 @@
 # BoltzGen.jl
 
-A Julia implementation of the BoltzGen/Boltz2 protein design and structure prediction pipeline. Supports both **protein design** (BoltzGen1) and **structure prediction/folding** (Boltz2) with a REPL-friendly API for interactive use.
+Unofficial Julia implementation of the BoltzGen/Boltz2 protein design and structure prediction pipeline. Supports both **protein design** (BoltzGen1) and **structure prediction/folding** (Boltz2) with a REPL-friendly API for interactive use.
 
 ## Features
 
@@ -21,7 +21,7 @@ BoltzGen.jl is not yet registered in the Julia General registry. Add it directly
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/MurrellGroup/BoltzGen.jl", rev="consolidation")
+Pkg.add(url="https://github.com/MurrellGroup/BoltzGen.jl")
 ```
 
 ### Dependencies
