@@ -240,6 +240,18 @@ chain_B = "FGHIKLMNPQRSTVWYACDE"
 result = BoltzGen.fold_from_sequences(fold, [chain_A, chain_B]; steps=200, seed=7)
 ```
 
+> **TODO: Per-chain MSA in REPL API.** The YAML parser (`design_from_yaml`) supports
+> per-chain MSA files — each chain can reference a different MSA, and the parser
+> horizontally concatenates them with gaps at non-covered positions (see
+> `yaml_parser.jl:1976-2049`). However, the REPL API functions (`fold_from_sequences`,
+> `fold_from_sequence`, `fold_from_structure`) only accept a single unified `msa_file`
+> or `msa_sequences` argument that applies to the full concatenated token stream. To
+> use per-chain MSA via the REPL API, callers must currently pre-concatenate MSA rows
+> themselves (inserting gaps at non-target positions) and pass the result via
+> `msa_sequences`. The per-chain concatenation logic should be extracted from the YAML
+> parser into a shared helper and exposed in the REPL API (e.g.
+> `fold_from_sequences(...; msa_files=["chain_a.a3m", nothing])`).
+
 ### Re-fold a structure with affinity prediction
 
 ```julia

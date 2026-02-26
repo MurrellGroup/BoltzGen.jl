@@ -176,9 +176,9 @@ function _to_ff_logits3(x)
 end
 
 function _unsqueeze_local(x, dim::Int)
-    sz = collect(size(x))
-    insert!(sz, dim, 1)
-    return reshape(x, Tuple(sz))
+    sz = size(x)
+    new_sz = ntuple(i -> i < dim ? sz[i] : (i == dim ? 1 : sz[i-1]), ndims(x) + 1)
+    return reshape(x, new_sz)
 end
 
 function (cm::ConfidenceModule)(

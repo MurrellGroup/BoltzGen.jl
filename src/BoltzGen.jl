@@ -1,6 +1,7 @@
 module BoltzGen
 
 using Onion
+using Zygote: Zygote
 using ProtInterop
 using ProtInterop: BondViolation, load_msa_sequences  # re-exported by BoltzGen
 using NNlib
@@ -29,6 +30,8 @@ include("masker.jl")
 include("output.jl")
 include("bond_lengths.jl")
 include("boltz.jl")
+include("differentiable.jl")
+include("differentiable_api.jl")
 include("api.jl")
 
 export BoltzModel
@@ -63,5 +66,10 @@ export fold_from_sequence, fold_from_sequences, fold_from_structure, target_cond
 export output_to_pdb, output_to_pdb_atom37, output_to_mmcif
 export write_outputs, confidence_metrics
 export check_bond_lengths, print_bond_length_report, BondViolation
+
+# Differentiable Boltz2 forward path exports
+export boltz2_differentiable_forward, sample_differentiable
+export set_binder_sequence, setup_boltz2_design, make_boltz2_loss_function
+export init_soft_sequence, decode_soft_sequence
 
 end

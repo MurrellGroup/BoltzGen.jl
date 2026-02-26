@@ -102,21 +102,21 @@ end
 
 function (layer::DiffusionTransformerLayer)(a, s, bias, mask, to_keys, multiplicity::Int)
     b = layer.adaln(a, s)
-    k_in = b
-    mask_k = mask
-    if to_keys !== nothing
-        k_in = to_keys(b)
-        # handle mask (N,B) -> (H,B*NW) in to_keys
-        mask_k = to_keys(mask)
+    # Use if-expression to avoid variable reassignment that confuses Zygote's
+    # gradient accumulation (k_in and b have different shapes when to_keys != nothing)
+    k_in, mask_k = if to_keys !== nothing
+        (to_keys(b), to_keys(mask))
+    else
+        (b, mask)
     end
 
     b2 = layer.pair_bias_attn(b, bias, mask_k, k_in; multiplicity=multiplicity)
     scale = NNlib.sigmoid.(layer.output_projection(s))
-    b2 = scale .* b2
+    b2_scaled = scale .* b2
 
-    a = a .+ b2
-    a = a .+ layer.transition(a, s)
-    return layer.post_lnorm(a)
+    a2 = a .+ b2_scaled
+    a3 = a2 .+ layer.transition(a2, s)
+    return layer.post_lnorm(a3)
 end
 
 @concrete struct DiffusionTransformer <: Onion.Layer
@@ -135,20 +135,20 @@ function DiffusionTransformer(; depth::Int, heads::Int, dim::Int=384, dim_single
 end
 
 function (t::DiffusionTransformer)(a, s; bias, mask, to_keys=nothing, multiplicity::Int=1, use_uniform_bias::Bool=false)
-    D = size(bias, 1)
-    N = size(bias, 2)
-    M = size(bias, 3)
-    B = size(bias, 4)
     L = length(t.layers)
 
-    if !use_uniform_bias
+    if use_uniform_bias
+        for (i, layer) in enumerate(t.layers)
+            a = layer(a, s, bias, mask, to_keys, multiplicity)
+        end
+    else
+        D = size(bias, 1)
         @assert D % L == 0 "bias feature dim must be divisible by layers"
-        bias = reshape(bias, D ÷ L, L, N, M, B)
-    end
-
-    for (i, layer) in enumerate(t.layers)
-        bias_l = use_uniform_bias ? bias : view(bias, :, i, :, :, :)
-        a = layer(a, s, bias_l, mask, to_keys, multiplicity)
+        bias_reshaped = reshape(bias, D ÷ L, L, size(bias, 2), size(bias, 3), size(bias, 4))
+        for (i, layer) in enumerate(t.layers)
+            bias_l = view(bias_reshaped, :, i, :, :, :)
+            a = layer(a, s, bias_l, mask, to_keys, multiplicity)
+        end
     end
     return a
 end
@@ -175,26 +175,26 @@ function (t::AtomTransformer)(q, c; bias, to_keys, mask, multiplicity::Int=1)
     Bq = size(q, 3)
     NW = N ÷ W
 
-    # reshape into windows: (C, W, NW, B) -> (C, W, B*NW)
-    qw = reshape(q, C, W, NW, Bq)
-    cw = reshape(c, size(c,1), W, NW, Bq)
-    mw = reshape(mask, W, NW, Bq)
+    # Reshape into windows — use unique variable names to avoid Zygote variable-reassignment
+    # bugs where gradient accumulation across different shapes causes DimensionMismatch.
+    # (C, N, B) -> (C, W, NW, B) -> (C, W, B, NW) -> (C, W, B*NW)
+    qw4 = reshape(q, C, W, NW, Bq)
+    cw4 = reshape(c, size(c,1), W, NW, Bq)
+    mw3 = reshape(mask, W, NW, Bq)
 
-    qw = permutedims(qw, (1, 2, 4, 3))
-    cw = permutedims(cw, (1, 2, 4, 3))
-    mw = permutedims(mw, (1, 3, 2))
+    qw4p = permutedims(qw4, (1, 2, 4, 3))
+    cw4p = permutedims(cw4, (1, 2, 4, 3))
+    mw3p = permutedims(mw3, (1, 3, 2))
 
-    qw = reshape(qw, C, W, Bq * NW)
-    cw = reshape(cw, size(c,1), W, Bq * NW)
-    mw = reshape(mw, W, Bq * NW)
+    qw = reshape(qw4p, C, W, Bq * NW)
+    cw = reshape(cw4p, size(c,1), W, Bq * NW)
+    mw = reshape(mw3p, W, Bq * NW)
 
-    # bias is (D, W, H, K, B)
-    if multiplicity != 1
-        bias = repeat_interleave_batch(bias, multiplicity)
-    end
-    bias_w = permutedims(bias, (1, 2, 3, 5, 4))
-    Bbias = size(bias, 5)
-    bias_w = reshape(bias_w, size(bias,1), W, H, Bbias * NW)
+    # bias is (D, W, H, K, B) — unique names to avoid shape-changing reassignment
+    bias_eff = multiplicity != 1 ? repeat_interleave_batch(bias, multiplicity) : bias
+    bias_perm = permutedims(bias_eff, (1, 2, 3, 5, 4))
+    Bbias = size(bias_eff, 5)
+    bias_w = reshape(bias_perm, size(bias_eff,1), W, H, Bbias * NW)
 
     function to_keys_new(x)
         if ndims(x) == 2
@@ -208,11 +208,10 @@ function (t::AtomTransformer)(q, c; bias, to_keys, mask, multiplicity::Int=1)
         end
     end
 
-    out = t.diffusion_transformer(qw, cw; bias=bias_w, mask=mw, to_keys=to_keys_new, multiplicity=1)
+    out_flat = t.diffusion_transformer(qw, cw; bias=bias_w, mask=mw, to_keys=to_keys_new, multiplicity=1)
 
-    # reshape back: (C, W, B*NW) -> (C, W, NW, B) -> (C, N, B)
-    out = reshape(out, C, W, Bq, NW)
-    out = permutedims(out, (1, 2, 4, 3))
-    out = reshape(out, C, N, Bq)
-    return out
+    # reshape back: (C, W, B*NW) -> (C, W, B, NW) -> (C, W, NW, B) -> (C, N, B)
+    out4 = reshape(out_flat, C, W, Bq, NW)
+    out4p = permutedims(out4, (1, 2, 4, 3))
+    return reshape(out4p, C, N, Bq)
 end

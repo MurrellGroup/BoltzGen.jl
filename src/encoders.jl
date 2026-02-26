@@ -396,8 +396,8 @@ function single_to_keys(single, indexing_matrix, W::Int, H::Int)
 
     h = H ÷ (W ÷ 2)
     index_t = permutedims(indexing_matrix, (2, 1)) # (h*K, 2K)
-    # Transfer indexing matrix to same device as input
-    index_t = copyto!(similar(single, Float32, size(index_t)), index_t)
+    # Transfer indexing matrix to same device as input (constant, no gradient)
+    index_t = Zygote.@ignore copyto!(similar(single, Float32, size(index_t)), index_t)
 
     # Replace loop with single matmul: index_t @ x_flat for all (b, i) slices at once
     # x is (B, 2K, W÷2, C) — rearrange so 2K is first dim, flatten the rest
@@ -501,26 +501,30 @@ function (ae::AtomEncoder)(feats; s_trunk=nothing, z=nothing)
     N = size(c, 2)
     B = size(c, 3)
     K = N ÷ W
-    indexing_matrix = get_indexing_matrix(K, W, H)
+    indexing_matrix = Zygote.@ignore get_indexing_matrix(K, W, H)
 
     to_keys = x -> single_to_keys(x, indexing_matrix, W, H)
 
-    atom_ref_pos_queries = reshape(atom_ref_pos, 3, W, K, B)
-    atom_ref_pos_keys = to_keys(atom_ref_pos)
+    # Reference positions are fixed features — @ignore
+    d, d_norm = Zygote.@ignore begin
+        atom_ref_pos_queries = reshape(atom_ref_pos, 3, W, K, B)
+        atom_ref_pos_keys = to_keys(atom_ref_pos)
+        dd = reshape(atom_ref_pos_keys, 3, 1, H, K, B) .- reshape(atom_ref_pos_queries, 3, W, 1, K, B)
+        dd_norm = sum(dd .* dd; dims=1)
+        dd_norm = 1f0 ./ (1f0 .+ dd_norm)
+        (dd, dd_norm)
+    end
 
-    # reshape for pairwise: (3, W, 1, K, B) and (3, 1, H, K, B)
-    d = reshape(atom_ref_pos_keys, 3, 1, H, K, B) .- reshape(atom_ref_pos_queries, 3, W, 1, K, B)
-    d_norm = sum(d .* d; dims=1)
-    d_norm = 1f0 ./ (1f0 .+ d_norm)
-
-    atom_mask_queries = reshape(atom_mask, W, K, B)
-    atom_mask_keys = reshape(to_keys(Float32.(atom_mask)), H, K, B) .> 0.5
-    atom_uid_queries = reshape(atom_uid, W, K, B)
-    atom_uid_keys = reshape(to_keys(Float32.(atom_uid)), H, K, B)
-    atom_uid_keys = round.(Int, atom_uid_keys)
-
-    v = (reshape(atom_mask_queries, 1, W, 1, K, B) .& reshape(atom_mask_keys, 1, 1, H, K, B) .& (reshape(atom_uid_queries, 1, W, 1, K, B) .== reshape(atom_uid_keys, 1, 1, H, K, B)))
-    v = Float32.(v)
+    # These are all fixed features (don't depend on soft_seq) — wrap in @ignore
+    v = Zygote.@ignore begin
+        atom_mask_queries = reshape(atom_mask, W, K, B)
+        atom_mask_keys = reshape(to_keys(Float32.(atom_mask)), H, K, B) .> 0.5
+        atom_uid_queries = reshape(atom_uid, W, K, B)
+        atom_uid_keys = reshape(to_keys(Float32.(atom_uid)), H, K, B)
+        atom_uid_keys = round.(Int, atom_uid_keys)
+        vv = (reshape(atom_mask_queries, 1, W, 1, K, B) .& reshape(atom_mask_keys, 1, 1, H, K, B) .& (reshape(atom_uid_queries, 1, W, 1, K, B) .== reshape(atom_uid_keys, 1, 1, H, K, B)))
+        Float32.(vv)
+    end
 
     p = ae.embed_atompair_ref_pos(d) .* v
     p = p .+ ae.embed_atompair_ref_dist(d_norm) .* v

@@ -277,7 +277,7 @@ function preconditioned_network_forward(ad::AtomDiffusion, noised_atom_coords, s
     batch = size(noised_atom_coords, 3)
     sigma_vec = sigma
     if isa(sigma, Float32) || isa(sigma, Float64)
-        sigma_vec = fill!(similar(noised_atom_coords, Float32, batch), Float32(sigma))
+        sigma_vec = Onion.zeros_like(noised_atom_coords, Float32, batch) .+ Float32(sigma)
     end
 
     padded_sigma = reshape(sigma_vec, 1, 1, length(sigma_vec))
